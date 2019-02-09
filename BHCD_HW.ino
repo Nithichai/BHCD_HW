@@ -4,14 +4,14 @@
 #include <MicroGear.h>            // Microgear Library
 #include <HTTPClient.h>           // HTTPClient Library
 #include <ArduinoJson.h>          // JSON Library
-#include <WiFi.h>                 // WiFi Library
+#include <WiFi.h>                 // WiFi Library 
 #include <DNSServer.h>            // DNSServer Library
 #include <WebServer.h>            // WebServer Library
 #include <WiFiClient.h>           // WiFiClient Library
 #include <FS.h>                   // File System Wrapper Library
 #include <SPIFFS.h>               // SPI File System Library
 
-MPU6050 mpu;                // MPU6050 Init
+MPU6050 mpu;                      // MPU6050 Init
 const uint8_t scl = 22;           // SCL Pin
 const uint8_t sda = 21;           // SDA Pin
 const uint8_t int_1 = 25;         // Interrupt Pin
@@ -37,7 +37,7 @@ const char* host = "http://numpapick.herokuapp.com/bot.php";    // Numpapick API
 const byte DNS_PORT = 53;         // DNS Port
 IPAddress apIP(192, 168, 4, 1);   // Access Point IP
 DNSServer dnsServer;              // DNSServer init
-WebServer server(80);      // WebServer init
+WebServer server(80);             // WebServer init
 
 unsigned long timer;
 unsigned long preTime; 
@@ -61,10 +61,12 @@ int pre_program_mode = 0;     // Pre program mode
 int start_ap = 1 ;          // Start AP state
 String ssid_list[4];        // SSID list
 String password_list[4];    // Password list
-char ALIAS[9];              // ALIAS of ???
+char ALIAS[64];             // ALIAS of ???
 
-long chipid = ESP.getEfuseMac();                // Get chip id
-String Device_id =  String(chipid);             // Set string to chip id
+uint64_t chipid = ESP.getEfuseMac();            // Get chip id
+char chipidBuffer[64];                          // Chip id buffer
+int lenChipidBuffer = sprintf(chipidBuffer, "%04X%08X", (uint16_t)(chipid>>32), (uint32_t)chipid);
+String Device_id = chipidBuffer;                // Set string to chip id
 String Device_password = "Smarthelper";         // Device Password
 
 String firstname;
@@ -714,7 +716,7 @@ void send_json(String data, String MSG) {
   Serial.println(JSONmessageBuffer);
   Serial.println("JSONmessageBuffer"); 
   HTTPClient http;    //Declare object of class HTTPClient
-Serial.println("start http1"); 
+  Serial.println("start http1"); 
   http.begin(host);      //Specify request destination
   Serial.println("http.begin(host)"); 
   http.addHeader("Content-Type", "application/json");  //Specify content-type header
