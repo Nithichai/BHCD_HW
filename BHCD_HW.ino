@@ -1,5 +1,5 @@
-#include "MPU6050.h"              // MPU6050 Library
-#include "Wire.h"                 // I2C Library
+#include <MPU6050.h>              // MPU6050 Library
+#include <Wire.h>                 // I2C Library
 #include <Time.h>                 // Time Library 
 #include <MicroGear.h>            // Microgear Library
 #include <HTTPClient.h>           // HTTPClient Library
@@ -27,7 +27,7 @@ const uint8_t FreefallDetectionDuration = 150;      // Freefall detection durati
 #define confirm_button   34       // Select Mode Button
 #define battery_adc      35       // Battery Read Pin
 #define ble_button       39       // BLE Button
-#define timeBuzzer             10       // Time for buzzer delay 
+#define timeBuzzer       10       // Time for buzzer delay 
 
 const char* host = "http://numpapick.herokuapp.com/bot.php";    // Numpapick API host
 #define APPID      "numpapicklinebot"                           // Change this to your APPID
@@ -814,7 +814,7 @@ void setup() {
   Serial.println("Initialize MPU");
 
   //#####verify I2C connection#####
- Serial.println("Testing device connections...");
+  Serial.println("Testing device connections...");
   while (!mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_16G)) {
     pinMode(vibration_motor, OUTPUT);
     digitalWrite(vibration_motor, LOW);
