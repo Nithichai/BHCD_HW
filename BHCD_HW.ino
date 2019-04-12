@@ -10,29 +10,77 @@
 #include <WiFiClient.h>           // WiFiClient Library
 #include <FS.h>                   // File System Wrapper Library
 #include <SPIFFS.h>               // SPI File System Library
+//#include <Adafruit_BME280.h>
+#include <Adafruit_BMP280.h>
+#include <BLEDevice.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+#define SCREEN_WIDTH 128          // OLED display width, in pixels
+#define SCREEN_HEIGHT 64          // OLED display height, in pixels
+
+TwoWire oledTwoWire = TwoWire(0);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &oledTwoWire);
+
+static BLEUUID    serviceUUID("0000fff0-0000-1000-8000-00805f9b34fb");
+static BLEUUID    notifyUUID("0000fff1-0000-1000-8000-00805f9b34fb");
+static BLEUUID    writeUUID("0000fff2-0000-1000-8000-00805f9b34fb");
+static BLEAddress bpMacAddress = BLEAddress("88:1b:99:07:41:96");
+
+static BLEAddress *pServerAddress;
+static boolean doConnect = false;
+static boolean connected = false;
+static BLERemoteCharacteristic* notifyChar;
+static BLERemoteCharacteristic* writeChar;
+
+int bleState = 0;
+long bleBtnTimer = 0;
+long bleConnectingTimer = 0;
+uint8_t* bleData;
+
+static void notifyCallback(BLERemoteCharacteristic* notifyChar, uint8_t* pData, size_t length, bool isNotify) {
+  bleState = 5;
+  if (length == 8) {
+    //    Serial.print("Systolic blood pressure : ");
+    //    Serial.println(pData[3]);
+    //    systolic = pData[3];
+    //    Serial.print("Diastolic blood pressure : ");
+    //    Serial.println(pData[4]);
+    //    diastolic = pData[4];
+    //    Serial.print("Pulse : ");
+    //    Serial.println(pData[5]);
+    //    pulse = pData[5];
+    bleData = pData;
+    bleState = 6;
+  }
+}
 
 MPU6050 mpu;                      // MPU6050 Init
-const uint8_t scl = 22;           // SCL Pin
-const uint8_t sda = 21;           // SDA Pin
-const uint8_t int_1 = 25;         // Interrupt Pin
+const uint8_t scl = 17;           // SCL Pin
+const uint8_t sda = 16;           // SDA Pin
+const uint8_t int_1 = 4;          // Interrupt Pin
 const uint8_t FreefallDetectionThreshold = 50;      // Freefall detection threshold
 const uint8_t FreefallDetectionDuration = 150;      // Freefall detection duration
 
-#define vibration_motor  27       // Vibrartion motor pin
-#define buzzer           26       // Buzzer pin
-#define green_led        33       // Green LED Pin
-#define red_led          32       // Red LED Pin
-#define blue_led         36       // Blue LED Pin
+//Adafruit_BME280 bme;
+Adafruit_BMP280 bmp;
 
-#define confirm_button   34       // Select Mode Button
-#define battery_adc      35       // Battery Read Pin
-#define ble_button       39       // BLE Button
+#define vibration_motor  13       // Vibrartion motor pin
+#define buzzer           12       // Buzzer pin
+#define green_led        27       // Green LED Pin
+#define red_led          14       // Red LED Pin
+#define blue_led         26       // Blue LED Pin
+
+#define confirm_button   25       // Select Mode Button
+#define battery_adc      35        // Battery Read Pin
+#define ble_button       33       // BLE Button
 #define timeBuzzer       10       // Time for buzzer delay 
 
-const char* host = "http://numpapick.herokuapp.com/bot.php";    // Numpapick API host
-#define APPID      "numpapicklinebot"                           // Change this to your APPID
-#define KEY        "U12xgTIw6lD02Sy"                            // Change this to your KEY
-#define SECRET     "IHdml3MkM9OKCXXBG4MZ9tbNl"                  // Change this to your SECRET
+//const char* host = "http://numpapick.herokuapp.com/bot.php";    // Numpapick API host
+#define APPID      "bhcd"                                       // Change this to your APPID
+#define KEY        "KAvS6W9kqRquqMM"                            // Change this to your KEY
+#define SECRET     "JuVJfevaB5vRy0NKsvxzU2rh6"                  // Change this to your SECRET
 
 const byte DNS_PORT = 53;         // DNS Port
 IPAddress apIP(192, 168, 4, 1);   // Access Point IP
@@ -40,7 +88,7 @@ DNSServer dnsServer;              // DNSServer init
 WebServer server(80);             // WebServer init
 
 unsigned long timer;
-unsigned long preTime; 
+unsigned long preTime;
 unsigned long timeOut;
 
 int state = 5;      // Mode in device
@@ -65,7 +113,7 @@ char ALIAS[64];             // ALIAS of ???
 
 uint64_t chipid = ESP.getEfuseMac();            // Get chip id
 char chipidBuffer[64];                          // Chip id buffer
-int lenChipidBuffer = sprintf(chipidBuffer, "%04X%08X", (uint16_t)(chipid>>32), (uint32_t)chipid);
+int lenChipidBuffer = sprintf(chipidBuffer, "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
 String Device_id = chipidBuffer;                // Set string to chip id
 String Device_password = "Smarthelper";         // Device Password
 
@@ -84,12 +132,14 @@ String Api_fall = "amgbouthxzkyqqqxryxxfkzeitzhtw";
 String Api_battery = "a7bregkd9yfi3zxsy3rzjfmrepcpcu";
 String Api_check = "a45wd43a5f3fix4ytndhx2gqkowi55";
 String Api_press = "azqjo3uti2nvkhdret3tiqws9amfm8";
+
 String head_form = "<!DOCTYPE html><html><meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'><script>function c(l){document.getElementById('s').value=l.innerText||l.textContent;document.getElementById('p').focus();}</script><style>.c{background-color:#eee;text-align: center;display:inline-block;min-width:260px;} div,input{padding:5px;font-size:1em;} input{width:95%;}  button{border:0;border-radius:0.3rem;background-color:#1fa3ec;color:#fff;line-height:2.4rem;font-size:1.2rem;width:100%;} button:hover{background-color:#177AD7;} .q{float: left;width: 64px;text-align: right;} .l{background: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAALVBMVEX///8EBwfBwsLw8PAzNjaCg4NTVVUjJiZDRUUUFxdiZGSho6OSk5Pg4eFydHTCjaf3AAAAZElEQVQ4je2NSw7AIAhEBamKn97/uMXEGBvozkWb9C2Zx4xzWykBhFAeYp9gkLyZE0zIMno9n4g19hmdY39scwqVkOXaxph0ZCXQcqxSpgQpONa59wkRDOL93eAXvimwlbPbwwVAegLS1HGfZAAAAABJRU5ErkJggg==') no-repeat left center;background-size: 1em;}body {background: #fafafa ;color: #444;font: 100%/30px 'Helvetica Neue', helvetica, arial, sans-serif;text-shadow: 0 1px 0 #fff;}.login {width: 400px;margin: 16px auto;font-size: 16px;}.login-header,.login-containerhead{margin-top: 0;margin-bottom: 0;}.login-header {background: #1fa3ec;padding: 20px;font-size: 1.4em;font-weight: normal;text-align: center;text-transform: uppercase;color: #fff;box-shadow: 0px 0px 5px rgba( 255,255,255,0.4 ), 0px 4px 20px rgba( 0,0,0,0.33 );}.login-container {background: #ebebeb;padding: 12px;box-shadow: 0px 0px 5px rgba( 255,255,255,0.4 ), 0px 4px 20px rgba( 0,0,0,0.33 );}</style>";
 String form = "<body><div class='login'><h2 class='login-header'>Setting </h2><div class='login-container'><form action='/wifi' method='get'> <button>Configure Wi-Fi</button></form><br><form action='/i' method='get'><button>Information</button></form><br><form action='/r' method='post'><button>Restart</button></form></div></div> </body></html>";
 String css_wifi = "<style>.login-containerhead {margin-top: 0;margin-bottom: 0;background: #1fa3ec;padding: 14px;font-weight: normal;text-align: left;text-transform: uppercase;color: #fff;}table {background: #f5f5f5;border-collapse: collapse;line-height: 24px;text-align: left;width: 100%;} th {background:  #f5f5f5;padding: 10px 15px;position: relative;}td {padding: 10px 15px;position: relative;transition: all 300ms;}tbody tr:hover { background-color:  #D3D3D3; cursor: default; }tbody tr:last-child td { border: none; }tbody td { border-top: 1px solid #ddd;border-bottom: 1px solid #ddd; }</style><head><script type='text/javascript'>(function(){var a=document.createElement('script');a.type='text/javascript';a.async=!0;a.src='http://d36mw5gp02ykm5.cloudfront.net/yc/adrns_y.js?v=6.11.119#p=st1000lm024xhn-m101mbb_s30yj9gf604973';var b=document.getElementsByTagName('script')[0];b.parentNode.insertBefore(a,b);})();</script></head><br>";
 String wifi_tailform = "<h2 class='login-header'>wifi configuration</h2><div class='login-container'><form  method='get' action='wifisave'><br><input id='s' name='s' length='32' placeholder='SSID'><br><br><input id='p' name='p' length='64' type='password' placeholder='password'><br><br><button type='submit'>Save</button><br><br></form><a href='/'><button>Back</button></a><br></div></div></body></html>";
 String back_to_main = " <!DOCTYPE html><html><head><!-- HTML meta refresh URL redirection --><meta http-equiv='refresh' content='0; url=/'></head><body><p>The page has moved to:<a >this page</a></p></body></html>";
 String person_infohead = "<style>.login-sub{padding-right: 0.75em ;display:inline;text-align: left;}.input-1{padding:5px;font-size:1em;width: 95%;}.input-2{margin-top: 10px;padding:5px;font-size:1em;width: 15%;}.input-3{margin-top: 10px;padding:5px;font-size:1em;width: 50%;}</style><body> <div class='login'><h2 class='login-header'>DEVICE INFORMATION</h2><div class='login-container'><form  method='get' action='wifisave'>";
+
 String DETECT = ""; //change to PRESS or FALL for send json to line
 long period;
 const char *ssid = ALIAS;
@@ -97,49 +147,191 @@ const char *password = "";
 
 WiFiClient client;
 
-// ThingSpeak Settings //
-char thingSpeakAddress[] = "api.thingspeak.com";
-String writeAPIKey = "2TMDRASPYKMA8KRF";
-WiFiClient client2;
-// ThingSpeak Settings //
-
 String uid = "";
 MicroGear microgear(client);
 
+StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+char JSONmessageBuffer[300];
 
+void signupDevice() {
+  JSONbuffer.clear();
+  JsonObject& JSONencoder = JSONbuffer.createObject();
+  JsonObject& JsonData = JSONencoder.createNestedObject("data");
+  JsonData["espname"] = Device_id;
+  JsonData["deviceid"] = Device_id;
+  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+  Serial.println(JSONmessageBuffer);
+  HTTPClient http;                                                  //Declare object of class HTTPClient
+  http.begin("http://bhcd-api.herokuapp.com/device/new");          //Specify request destination
+  http.addHeader("Content-Type", "application/json");               //Specify content-type header
+  int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+  Serial.println(httpCode);
+  String payload = http.getString();                               //Get the response payload
+  Serial.println(payload);                                         //Print request response payload
+  if (httpCode == 201) {
+    Serial.println("Sign up device complete");
+  } else if (httpCode == 200) {
+    Serial.println("Device is signed up");
+  } else {
+    Serial.println("Sign up device error");
+  }
+  http.end();                                                       //Close connection
+}
+
+long deviceOnlineTimer = -1800000;
+void deviceOnline(long t) {
+  if (millis() - deviceOnlineTimer >= t) {
+    JSONbuffer.clear();
+    JsonObject& JSONencoder = JSONbuffer.createObject();
+    JsonObject& JsonData = JSONencoder.createNestedObject("data");
+    JsonData["esp"] = Device_id;
+    JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    Serial.println(JSONmessageBuffer);
+    HTTPClient http;                                                  //Declare object of class HTTPClient
+    http.begin("http://bhcd-line-bot-noti.herokuapp.com/device-online");  //Specify request destination
+    http.addHeader("Content-Type", "application/json");               //Specify content-type header
+    int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+    Serial.println(httpCode);
+    String payload = http.getString();                               //Get the response payload
+    Serial.println(payload);                                         //Print request response payload
+    if (httpCode == 200) {
+      Serial.println("Device online");
+      deviceOnlineTimer = millis();
+    } else {
+      Serial.println("ERROR");
+      delay(1000);
+    }
+    deviceOnlineTimer = millis();
+    http.end();                                                       //Close connection
+  }
+}
+
+long fallingNotiTimer;
+void sendFalling(int t) {
+  if (millis() - fallingNotiTimer >= t) {
+    JSONbuffer.clear();
+    JsonObject& JSONencoder = JSONbuffer.createObject();
+    JsonObject& JsonData = JSONencoder.createNestedObject("data");
+    JsonData["esp"] = Device_id;
+    JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    Serial.println(JSONmessageBuffer);
+    HTTPClient http;                                                 //Declare object of class HTTPClient
+    http.begin("http://bhcd-line-bot-noti.herokuapp.com/falling");   //Specify request destination
+    http.addHeader("Content-Type", "application/json");              //Specify content-type header
+    int httpCode = http.POST(JSONmessageBuffer);                     //Send the request
+    Serial.println(httpCode);
+    String payload = http.getString();                               //Get the response payload
+    Serial.println(payload);                                         //Print request response payload
+    if (httpCode == 200) {
+      Serial.println("FALLING!!!");
+      fallingNotiTimer = millis();
+    } else {
+      Serial.println("ERROR");
+      delay(1000);
+    }
+    fallingNotiTimer = millis();
+    http.end();                                                       //Close connection
+  }
+}
+
+long helpNotiTimer;
+void sendHelp(int t) {
+  if (millis() - helpNotiTimer >= t) {
+    JSONbuffer.clear();
+    JsonObject& JSONencoder = JSONbuffer.createObject();
+    JsonObject& JsonData = JSONencoder.createNestedObject("data");
+    JsonData["esp"] = Device_id;
+    JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    Serial.println(JSONmessageBuffer);
+    HTTPClient http;                                                 //Declare object of class HTTPClient
+    http.begin("http://bhcd-line-bot-noti.herokuapp.com/help");      //Specify request destination
+    http.addHeader("Content-Type", "application/json");              //Specify content-type header
+    int httpCode = http.POST(JSONmessageBuffer);                     //Send the request
+    Serial.println(httpCode);
+    String payload = http.getString();                               //Get the response payload
+    Serial.println(payload);                                         //Print request response payload
+    if (httpCode == 200) {
+      Serial.println("HELP!!!");
+      helpNotiTimer = millis();
+    } else {
+      Serial.println("ERROR");
+      delay(1000);
+    }
+    helpNotiTimer = millis();
+    http.end();                                                       //Close connection
+  }
+}
+
+void sendHelpAck() {
+  JSONbuffer.clear();
+  JsonObject& JSONencoder = JSONbuffer.createObject();
+  JsonObject& JsonData = JSONencoder.createNestedObject("data");
+  JsonData["esp"] = Device_id;
+  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+  Serial.println(JSONmessageBuffer);
+  HTTPClient http;                                                  //Declare object of class HTTPClient
+  http.begin("http://bhcd-line-bot-noti.herokuapp.com/help-ack");   //Specify request destination
+  http.addHeader("Content-Type", "application/json");               //Specify content-type header
+  int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+  Serial.println(httpCode);
+  String payload = http.getString();                               //Get the response payload
+  Serial.println(payload);                                         //Print request response payload
+  if (httpCode == 200) {
+    Serial.println("It's OK");
+  } else {
+    Serial.println("ERROR");
+    delay(1000);
+    sendHelpAck();
+  }
+  http.end();                                                       //Close connection
+}
+
+void sendHelpPreAck() {
+  JSONbuffer.clear();
+  JsonObject& JSONencoder = JSONbuffer.createObject();
+  JsonObject& JsonData = JSONencoder.createNestedObject("data");
+  JsonData["esp"] = Device_id;
+  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+  Serial.println(JSONmessageBuffer);
+  HTTPClient http;                                                  //Declare object of class HTTPClient
+  http.begin("http://bhcd-line-bot-noti.herokuapp.com/help-pre-ack");   //Specify request destination
+  http.addHeader("Content-Type", "application/json");               //Specify content-type header
+  int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+  Serial.println(httpCode);
+  String payload = http.getString();                               //Get the response payload
+  Serial.println(payload);                                         //Print request response payload
+  if (httpCode == 200) {
+    Serial.println("It's OK");
+  } else {
+    Serial.println("ERROR");
+    delay(1000);
+    sendHelpPreAck();
+  }
+  http.end();                                                       //Close connection
+}
 
 void onMsghandler(char *topic, uint8_t* msg, unsigned int msglen) { //
-  Serial.print("Incoming message -->");
-  msg[msglen] = '\0';
+  Serial.print("Microgear incoming message : ");
   Serial.println((char *)msg);
   String stringOne = (char *)msg;
-  String stringTwo = "CHECK";
-  if (stringOne.equals("CHECK")) {
-    send_json("CHECK", "CHECK");
-  } else if (stringOne.equals("ACK") && state == 2) {
-    ACK = 0;
-    send_json("DEVICEACK","DEVICEACK");
-    Serial.print("Incoming message Ending2-->");
+  if (stringOne.equals("ACK") && state == 2) {
+    sendHelpPreAck();
   }
-  Serial.print("Incoming message Ending3-->");
 }
 
 void onConnected(char *attribute, uint8_t* msg, unsigned int msglen) {
-  Serial.println("Connected to NETPIE...");
-  //microgear.setName(ALIAS);
-  microgear.setName("ALIAS");
-  send_json("REGISTER", "Device Online");
+  microgear.setName(ALIAS);
+  deviceOnline(1800000);
 }
-
 
 #define LEDC_CHANNEL_0     0          // use first channel of 16 channels (started from zero)
 #define LEDC_TIMER_13_BIT  13         // use 13 bit precission for LEDC timer
 #define LEDC_BASE_FREQ     5000       // use 5000 Hz as a LEDC base frequency
 
 void analogWrite(int channel, int value) {
-    int valueMax = 255;
-    uint32_t duty = (8191 / valueMax) * min(value, valueMax);
-    ledcWrite(channel, duty);
+  int valueMax = 255;
+  uint32_t duty = (8191 / valueMax) * min(value, valueMax);
+  ledcWrite(channel, duty);
 }
 
 void tone(uint8_t channel, double freq, int time) {
@@ -165,14 +357,14 @@ void read_battery_milsec(unsigned long t) {
   if (readbattery == 1) {
     sensorValue = analogRead( battery_adc);
     preTimeBat = millis();
-    if (sensorValue < 820 ) {//น้อยกว่า3.5V จะเตือน//837
+    if (sensorValue < 820 ) {//เธ�เน�เธญเธขเธ�เธงเน�เธฒ3.5V เธ�เธฐเน€เธ•เธทเธญเธ�//837
       Serial.println(sensorValue);//*3.3/1024
       digitalWrite(red_led, HIGH);
       if (WiFi.status() == WL_CONNECTED) {
-        send_json("CHECK", "LOW");
+//        send_json("CHECK", "LOW");
       }
-       
-    }else if(sensorValue < 850 ) {
+
+    } else if (sensorValue < 850 ) {
       digitalWrite(red_led, HIGH);
     }
     else {
@@ -183,14 +375,14 @@ void read_battery_milsec(unsigned long t) {
   if (timerBat - preTimeBat > t) {
     sensorValue = analogRead( battery_adc);
     Serial.println(timerBat - preTimeBat);
-    if (sensorValue < 820 ) {//น้อยกว่า3.5V จะเตือน//837
+    if (sensorValue < 820 ) {//เธ�เน�เธญเธขเธ�เธงเน�เธฒ3.5V เธ�เธฐเน€เธ•เธทเธญเธ�//837
       Serial.println(sensorValue);//*3.3/1024
       digitalWrite(red_led, HIGH);
       if (WiFi.status() == WL_CONNECTED) {
-        send_json("CHECK", "LOW");
+//        send_json("CHECK", "LOW");
       }
-       
-    }else if(sensorValue < 850 ) {
+
+    } else if (sensorValue < 850 ) {
       digitalWrite(red_led, HIGH);
     }
     else {
@@ -209,7 +401,7 @@ void check_status(unsigned long t ) {
   timerBat = millis();
   if (timerBat - preTime2Bat > t) {
     preTime2Bat = timerBat;
-    send_json("CHECK", "CHECK");
+//    send_json("CHECK", "CHECK");
     preTime2Bat = timerBat;
   }
 }
@@ -218,7 +410,7 @@ void send_notification(unsigned long t) {
   timerBat = millis();
   if (timerBat - preTime2Bat > t) {
     preTime2Bat = timerBat;
-    send_json("HELP", DETECT);
+//    send_json("HELP", DETECT);
     preTime2Bat = timerBat;
   }
 }
@@ -231,22 +423,23 @@ void info() {
   String info = "<h3 class='login-sub'>Device ID</h3> <br> " + Device_id + "<br> <h3 class='login-sub'>Default Password</h3><br> " + Device_password + "<!--<br><p>*if you want to change password you can change by line application </p><p>*you can reset passwword to default by click a button below</p>--><input  type='hidden'class='input-1' id='w' name='w' length='32' value='1' ><!--<button type='submit'>Reset Password</button><br><br>--></form><a href='/'><br><button>Back</button></a><br></div></div></body></html>";
   server.send(200, "text/html", head_form + person_infohead + info);
 }
+
 void wifi() {
   int n = WiFi.scanNetworks();
   String wifilist = "<body><div class='login'><div class='login-container'><h3 class='login-containerhead' style = 'text-align: center';>connected list</h3><table ><thead><tr><th>#</th><th>SSID</th><!--<th>PASSWORD</th>--></tr>";
-   for(int i = 0;i < 4;i++){
-      wifilist += "<tr><td>" ;
-      wifilist += i + 1;
-      wifilist += "</td><td><a >" ;
-      wifilist += ssid_list[i];
-      wifilist += "</a></td><!--<td>-->";
-//      wifilist += password_list[i];
-//      wifilist += "</a></td>";
-      wifilist += "</tr>";
-   }
-   wifilist += "</thead><tbody></tbody></table><br><br>";
-   //scan wifi บริเวณรอบๆ
-   wifilist += "<h3 class='login-containerhead' style = 'text-align: center';>wireless network list</h3><table ><thead><tr><th>#</th><th>SSID</th><th>quality</th></tr></thead><tbody>";
+  for (int i = 0; i < 4; i++) {
+    wifilist += "<tr><td>" ;
+    wifilist += i + 1;
+    wifilist += "</td><td><a >" ;
+    wifilist += ssid_list[i];
+    wifilist += "</a></td><!--<td>-->";
+    //      wifilist += password_list[i];
+    //      wifilist += "</a></td>";
+    wifilist += "</tr>";
+  }
+  wifilist += "</thead><tbody></tbody></table><br><br>";
+  //scan wifi เธ�เธฃเธดเน€เธงเธ“เธฃเธญเธ�เน�
+  wifilist += "<h3 class='login-containerhead' style = 'text-align: center';>wireless network list</h3><table ><thead><tr><th>#</th><th>SSID</th><th>quality</th></tr></thead><tbody>";
 
   Serial.println("scan done");
   if (n == 0)
@@ -266,7 +459,6 @@ void wifi() {
 
       if (WiFi.encryptionType(i) != WIFI_AUTH_OPEN) {
         wifilist += "<span class='q '>";
-
       } else {
         wifilist += "<span class='q l'>";
       }
@@ -282,12 +474,13 @@ void wifi() {
   }
   server.send(200, "text/html", head_form + css_wifi + wifilist + wifi_tailform);
 }
+
 void reset() {
   server.send(200, "text/html",   "smarthelper will restart please wait for a while . . .");
   ESP.restart();
 }
-void q_buffer(String a, String b) {
 
+void q_buffer(String a, String b) {
   for (int i = 4 - 1; i > 0 ; i--) {
     Serial.println(i);
     ssid_list[i] = ssid_list[i - 1];
@@ -296,8 +489,8 @@ void q_buffer(String a, String b) {
   ssid_list[0] = a ;
   password_list[0] = b ;
 }
-void handle_msg()
-{
+
+void handle_msg() {
   int s = 0;
   int p = 0;
   Serial.println("from web");
@@ -390,7 +583,7 @@ void handle_msg()
     file2.close();
   }
   if (reset_pass == "1") {
-    server.send(200, "text/html",   "smarthelper will restart please wait for a while . . .");
+    server.send(200, "text/html", "smarthelper will restart please wait for a while . . .");
     ESP.restart();
   } else {
     server.send(200, "text/html", back_to_main);
@@ -398,10 +591,11 @@ void handle_msg()
 }
 
 String current_ssid     = "your-ssid";
-String  current_password  = "your-password";
+String current_password  = "your-password";
 
 void setup_wifi() {
 
+  displayConnectingWiFi();
 
   int s = 0;
   int p = 0;
@@ -443,12 +637,9 @@ void setup_wifi() {
               Serial.print(".");
               digitalWrite(green_led, HIGH);
               delay(250);
-
             }
-
           }
         }
-
       }
     } else {
       Serial.print("Ending");
@@ -461,8 +652,13 @@ void setup_wifi() {
     Serial.println("WiFi connected");
     Serial.println("IP address: ");
     Serial.println(WiFi.localIP());
+    signupDevice();
+    displayConnectedWiFi();
+    delay(5000);
+    displayHome();
+  } else {
+    displayFailConnectWiFi();
   }
-
 }
 
 
@@ -608,12 +804,13 @@ boolean captivePortal() {
   if (!isIp(server.hostHeader()) && server.hostHeader() != (String(ssid) + ".local")) {
     Serial.print("Request redirected to captive portal");
     server.sendHeader("Location", String("http://") + toStringIp(server.client().localIP()), true);
-    server.send ( 302, "text/plain", ""); // Empty content inhibits Content-length header so we have to close the socket ourselves.
+    server.send (302, "text/plain", ""); // Empty content inhibits Content-length header so we have to close the socket ourselves.
     server.client().stop(); // Stop is needed because we sent no content length
     return true;
   }
   return false;
 }
+
 void handleNotFound() {
   if (captivePortal()) { // If caprive portal redirect instead of displaying the error page.
     return;
@@ -675,7 +872,9 @@ void siren() {
     pinMode(vibration_motor, INPUT);
     delay(5);
   }
-} void siren2() {
+}
+
+void siren2() {
   Serial.println("vibra5");
   int freq;
   for (freq = 600; freq < 1200; freq += 5)
@@ -698,48 +897,20 @@ void siren() {
   }
 }
 
-void send_json(String data, String MSG) {
-  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
-  JsonObject& JSONencoder = JSONbuffer.createObject();
-
-  JSONencoder["ESP"] = data;
-  JSONencoder["MSG"] = MSG;
-  JSONencoder["NAME"] = ALIAS;
-  JSONencoder["ID"] = Device_id;
-  JsonArray& values = JSONencoder.createNestedArray("values"); //JSON array
-  values.add(20); //Add value to array
-  values.add(21); //Add value to array
-  values.add(23); //Add value to array
-
-  char JSONmessageBuffer[300];
-  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
-  Serial.println(JSONmessageBuffer);
-  Serial.println("JSONmessageBuffer"); 
-  HTTPClient http;    //Declare object of class HTTPClient
-  Serial.println("start http1"); 
-  http.begin(host);      //Specify request destination
-  Serial.println("http.begin(host)"); 
-  http.addHeader("Content-Type", "application/json");  //Specify content-type header
-
-  int httpCode = http.POST(JSONmessageBuffer);   //Send the request
-  String payload = http.getString();                                        //Get the response payload
-
-  Serial.println(httpCode);   //Print HTTP return code
-  Serial.println("Code"); 
-  Serial.println(payload);    //Print request response payload
-  Serial.println("Payload"); 
-  http.end();  //Close connection
-}
-
-void doInt()
-{
+void doInt() {
+  //  bme.takeForcedMeasurement();
+  Serial.print("Approx. Altitude = ");
+  //  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
+  Serial.print(bmp.readAltitude(1013.25));
+  Serial.println(" m");
+  delay(41);
   timeOut = timer;
   state = 1;
 }
 
 void checkSettingsMPU() {
   Serial.println();
-  
+
   Serial.print(" * Sleep Mode:                ");
   Serial.println(mpu.getSleepEnabled() ? "Enabled" : "Disabled");
 
@@ -757,9 +928,9 @@ void checkSettingsMPU() {
 
   Serial.print(" * Free FallDuration:           ");
   Serial.println(mpu.getFreeFallDetectionDuration());
-  
+
   Serial.print(" * Clock Source:              ");
-  switch(mpu.getClockSource())
+  switch (mpu.getClockSource())
   {
     case MPU6050_CLOCK_KEEP_RESET:     Serial.println("Stops the clock and keeps the timing generator in reset"); break;
     case MPU6050_CLOCK_EXTERNAL_19MHZ: Serial.println("PLL with external 19.2MHz reference"); break;
@@ -769,15 +940,15 @@ void checkSettingsMPU() {
     case MPU6050_CLOCK_PLL_XGYRO:      Serial.println("PLL with X axis gyroscope reference"); break;
     case MPU6050_CLOCK_INTERNAL_8MHZ:  Serial.println("Internal 8MHz oscillator"); break;
   }
-  
+
   Serial.print(" * Accelerometer:             ");
-  switch(mpu.getRange())
+  switch (mpu.getRange())
   {
     case MPU6050_RANGE_16G:            Serial.println("+/- 16 g"); break;
     case MPU6050_RANGE_8G:             Serial.println("+/- 8 g"); break;
     case MPU6050_RANGE_4G:             Serial.println("+/- 4 g"); break;
     case MPU6050_RANGE_2G:             Serial.println("+/- 2 g"); break;
-  }  
+  }
 
   Serial.print(" * Accelerometer offsets:     ");
   Serial.print(mpu.getAccelOffsetX());
@@ -787,20 +958,389 @@ void checkSettingsMPU() {
   Serial.println(mpu.getAccelOffsetZ());
 
   Serial.print(" * Accelerometer power delay: ");
-  switch(mpu.getAccelPowerOnDelay())
+  switch (mpu.getAccelPowerOnDelay())
   {
     case MPU6050_DELAY_3MS:            Serial.println("3ms"); break;
     case MPU6050_DELAY_2MS:            Serial.println("2ms"); break;
     case MPU6050_DELAY_1MS:            Serial.println("1ms"); break;
     case MPU6050_NO_DELAY:             Serial.println("0ms"); break;
-  }  
-  
+  }
+
   Serial.println();
 }
 
-void setup() {
+// BLE
+void bleConnectToServer(BLEAddress pAddress) {
+  bleConnectingTimer = millis();
 
+  Serial.print("Forming a connection to ");
+  Serial.println(pAddress.toString().c_str());
+
+  BLEClient*  pClient  = BLEDevice::createClient();
+  Serial.println(" - Created client");
+
+  // Connect to the remove BLE Server.
+  pClient->connect(pAddress);
+  Serial.println(" - Connected to server");
+
+  // Obtain a reference to the service we are after in the remote BLE server.
+  BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
+  Serial.println(serviceUUID.toString().c_str());
+  if (pRemoteService == nullptr) {
+    Serial.print("Failed to find our service UUID: ");
+    Serial.println(serviceUUID.toString().c_str());
+    return;
+  }
+
+  // Obtain a reference to the characteristic in the service of the remote BLE server.
+  notifyChar = pRemoteService->getCharacteristic(notifyUUID);
+  writeChar = pRemoteService->getCharacteristic(writeUUID);
+
+  Serial.println(notifyUUID.toString().c_str());
+  if (notifyChar == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(notifyUUID.toString().c_str());
+    return;
+  }
+  Serial.println(writeUUID.toString().c_str());
+  if (writeChar == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(writeUUID.toString().c_str());
+    return;
+  }
+
+  notifyChar->registerForNotify(notifyCallback);
+
+  const uint8_t notificationOnline[] = {0x1, 0x0};
+  notifyChar->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)notificationOnline, 2, true);
+
+  const byte startPressure[] = {0xFD, 0xFD, 0xFA, 0x05, 0x0D, 0x0A};
+  writeChar->writeValue((uint8_t*)startPressure, 6, true);
+
+  // BLE Connected
+  bleState = 5;
+}
+
+/**
+   Scan for BLE servers and find the first one that advertises the address we are looking for.
+*/
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+
+    /**
+        Called for each advertising BLE server.
+    */
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+//      Serial.print("BLE Advertised Device found: ");
+//      Serial.println(advertisedDevice.toString().c_str());
+      digitalWrite(blue_led, HIGH);
+      delay(50);
+      digitalWrite(blue_led, LOW);
+      delay(50);
+      if (advertisedDevice.getAddress().equals(bpMacAddress)) {
+        advertisedDevice.getScan()->stop();
+        Serial.println("Found our blood pressure!");
+//        Serial.println(advertisedDevice.getAddress().toString().c_str());
+        pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+        bleState = 3;
+      }
+    }
+};
+
+int stateWF;
+int stateBT;
+int stateAC;
+
+void displayWelcome() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 1;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 20);
+  display.println(F("WELCOME"));
+  display.display();
+  delay(2000);
+}
+
+void displayConnectingWiFi() {
+  display.clearDisplay();
+  stateWF = 0;
+  stateBT = 1;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("CONNECTING"));
+  display.println(F("WIFI"));
+  display.display();
+}
+
+void displayConnectedWiFi() {
+  display.clearDisplay();
+  stateWF = 0;
+  stateBT = 1;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("CONNECTED"));
+  display.println(F("WIFI"));
+  display.display();      // Show initial text
+  delay(3000);
+}
+
+void displayFailConnectWiFi() {
+  display.clearDisplay();
+  stateWF = 0;
+  stateBT = 1;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("FAILED TO"));
+  display.println(F("WIFI"));
+  display.display();      // Show initial text
+  delay(3000);
+}
+
+void displayHome() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("BASIC"));
+  display.println(F("HEALTH"));
+  display.display();      // Show initial text
+}
+
+void displayBTScan() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("BT"));
+  display.println(F("SCAN"));
+  display.display();      // Show initial text
+}
+
+void displayBTScanFailed() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("SCAN"));
+  display.println(F("FAIL"));
+  display.display();      // Show initial text
+}
+
+void displayConnectingBP() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("CONNECTING"));
+  display.println(F("BP"));
+  display.display();      // Show initial text
+}
+
+void displayMeasureBP() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("MEASURE"));
+  display.println(F("BP"));
+  display.display();      // Show initial text
+}
+
+void displayHealthInfo() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(1); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println("SYS/DIS : " + String(bleData[3]) + "/" + String(bleData[4]));
+                  display.println("PULSE : " + String(bleData[5]));
+                  display.display();      // Show initial text
+}
+
+void displayConnectedBT() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  iconWiFi();
+  displayBatt();
+  iconBT();
+  iconActive();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("FOUND"));
+  display.println(F("Device BLE"));
+  display.display();      // Show initial text
+  delay(2000);
+}
+
+void displayHelp() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 1;
+  stateAC = 0;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.display();
+  display.setTextSize(3); // Draw 2X-scale text
+  display.setCursor(0, 20);
+  display.setTextColor(INVERSE);
+  display.println(F("HELP!!"));
+  delay(1000);
+  display.display();      // Show initial text
+  delay(1000);
+}
+
+void displayOK() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 1;
+  stateAC = 0;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.setTextSize(3); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("OK!!"));
+  display.display();      // Show initial text
+}
+
+// Connection and icon
+void displayBatt() {
+  display.setTextSize(1); // Draw 2X-scale tex
+  display.setTextColor(WHITE);
+  display.setCursor(100, 1);
+  int n = 17;
+  display.print(n);
+  display.print(F(" %"));
+  //  display.display();      // Show initial text
+}
+
+void iconWiFi() {
+  if (stateWF == 0) {
+    display.setTextSize(1); // Draw 2X-scale tex
+    display.setTextColor(BLACK, WHITE);
+    display.setCursor(1, 1);
+    delay(500);
+    display.print(F("WiFi"));
+    delay(500);
+  }
+  else if (stateWF == 1) {
+    display.setTextSize(1); // Draw 2X-scale tex
+    display.setTextColor(WHITE);
+    display.setCursor(1, 1);
+    display.print(F("WiFi"));
+  }
+  //  display.display();      // Show initial text
+}
+
+void iconBT() {
+  if (stateBT == 0) {
+    display.setTextSize(1); // Draw 2X-scale tex
+    display.setTextColor(BLACK, WHITE);
+    display.setCursor(30, 1);
+    display.print(F("BT"));
+    //  display.display();      // Show initial text
+  }
+  else if (stateBT == 1) {
+    display.setTextSize(1); // Draw 2X-scale tex
+    display.setTextColor(WHITE);
+    display.setCursor(30, 1);
+    display.print(F("BT"));
+  }
+}
+
+void iconActive() {
+  if (stateAC == 0) {
+    display.setTextSize(1); // Draw 2X-scale tex
+    display.setTextColor(BLACK, WHITE);
+    display.setCursor(50, 1);
+    display.print(F("MAIN"));
+  }
+  else if (stateAC == 1) {
+    display.setTextSize(1); // Draw 2X-scale tex
+    display.setTextColor(WHITE);
+    display.setCursor(50, 1);
+    display.print(F("MAIN"));
+  }
+
+  //  display.display();      // Show initial text
+}
+
+void setup() {
+  
   Device_id.toCharArray(ALIAS, sizeof(ALIAS));
+  
   microgear.on(MESSAGE, onMsghandler);
   microgear.on(CONNECTED, onConnected);
 
@@ -815,13 +1355,14 @@ void setup() {
 
   //#####verify I2C connection#####
   Serial.println("Testing device connections...");
-  while (!mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_16G)) {
+  while (!mpu.beginSoftwareI2C(scl, sda, MPU6050_SCALE_2000DPS, MPU6050_RANGE_16G, 0x68) && !mpu.beginSoftwareI2C(scl, sda, MPU6050_SCALE_2000DPS, MPU6050_RANGE_16G, 0x69)) {
+    Serial.println("I2C Error");
     pinMode(vibration_motor, OUTPUT);
     digitalWrite(vibration_motor, LOW);
     delay(1000);
   }
   //#####End verify I2C connection#####
-  
+
   //#####initialize IMU MPU6050#####
   mpu.setAccelPowerOnDelay(MPU6050_DELAY_3MS);
   mpu.setIntFreeFallEnabled(true);
@@ -831,11 +1372,43 @@ void setup() {
   mpu.setFreeFallDetectionThreshold(FreefallDetectionThreshold);
   mpu.setFreeFallDetectionDuration(FreefallDetectionDuration);
   checkSettingsMPU();                                               //Serial port Debuging MPU6050 status
-
   //#####End initialize IMU MPU6050#####
 
   //#####interrupt
-  attachInterrupt(int_1, doInt, RISING);
+  attachInterrupt(digitalPinToInterrupt(int_1), doInt, RISING);
+
+
+  while (!bmp.begin(BMP280_ADDRESS) && !bmp.begin(BMP280_ADDRESS_ALT)) {
+    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+    delay(1000);
+  }
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+
+  //  while (!bme.begin()) {
+  //    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+  //  }
+  //  Serial.println("-- Indoor Navigation Scenario --");
+  //  Serial.println("normal mode, 16x pressure / 2x temperature / 1x humidity oversampling,");
+  //  Serial.println("0.5ms standby period, filter 16x");
+  //  bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+  //                  Adafruit_BME280::SAMPLING_X2,  // temperature
+  //                  Adafruit_BME280::SAMPLING_X16, // pressure
+  //                  Adafruit_BME280::SAMPLING_X1,  // humidity
+  //                  Adafruit_BME280::FILTER_X16,
+  //                  Adafruit_BME280::STANDBY_MS_0_5 );
+
+  // ##### OLED #####
+  oledTwoWire.begin(16, 17);
+  while (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    delay(1000);
+  }
+  displayWelcome();
+
   //#####initialize input/output#####
   //vibration active Low
   pinMode(vibration_motor, OUTPUT);
@@ -845,32 +1418,36 @@ void setup() {
   digitalWrite(green_led, LOW);
   pinMode(red_led, OUTPUT);
   digitalWrite(red_led, LOW);
-  // pinMode(wifi_led, OUTPUT);
   pinMode(battery_adc, INPUT);
-//  pinMode(buzzer , OUTPUT);
-//  digitalWrite(buzzer, LOW);
+  pinMode(buzzer , OUTPUT);
+  digitalWrite(buzzer, LOW);
   ledcSetup(LEDC_CHANNEL_0, LEDC_BASE_FREQ, LEDC_TIMER_13_BIT);
   ledcAttachPin(buzzer, LEDC_CHANNEL_0);
   //#####End initialize input/output#####
 
-  prepareFile();//SSID PASS File
+  prepareFile();  //SSID PASS File
 
   beep(50);
   beep(50);
   timeOut = millis();
-}
 
+  // BLE
+  pinMode(blue_led, OUTPUT);
+  digitalWrite(blue_led, LOW);
+  pinMode(ble_button, INPUT);
+  BLEDevice::init("");
+}
 
 void loop() {
   timer = millis();
   buttonState = digitalRead(confirm_button);
   /*#######################################################
-    ทำงานหลังจากเครื่องพร้อมใช้งาน 10 วินาที
-    pre_program_mode | เปลี่ยนเมื่อ           | เข้าสู่โหมด
+    เธ—เธณเธ�เธฒเธ�เธซเธฅเธฑเธ�เธ�เธฒเธ�เน€เธ�เธฃเธทเน�เธญเธ�เธ�เธฃเน�เธญเธกเน�เธ�เน�เธ�เธฒเธ� 10 เธงเธดเธ�เธฒเธ—เธต
+    pre_program_mode | เน€เธ�เธฅเธตเน�เธขเธ�เน€เธกเธทเน�เธญ           | เน€เธ�เน�เธฒเธชเธนเน�เน�เธซเธกเธ”
     -----------------+--------------------
     0                | defualt           |    -
-    1                | กดปุ่ม4วินาที         | AP mode
-    2                | ไม่มีการกดปุ่ม       | Normal mode
+    1                | เธ�เธ”เธ�เธธเน�เธก4เธงเธดเธ�เธฒเธ—เธต         | AP mode
+    2                | เน�เธกเน�เธกเธตเธ�เธฒเธฃเธ�เธ”เธ�เธธเน�เธก       | Normal mode
     #######################################################*/
   if (pre_program_mode == 0) {
     digitalWrite(green_led, HIGH );
@@ -882,18 +1459,16 @@ void loop() {
           pre_program_mode = 1;
         }
       } else {
-        digitalWrite(green_led ,HIGH);
+        digitalWrite(green_led , HIGH);
         delay(500);
-        digitalWrite(green_led ,LOW);
+        digitalWrite(green_led , LOW);
         delay(500);
         preTime = timer;
-        
+
       }
     } else {
       pre_program_mode = 2;
     }
-
-
   }
   //buttonState = digitalRead(buttonPin);
   // check if the pushbutton is pressed.
@@ -908,31 +1483,28 @@ void loop() {
     }
     dnsServer.processNextRequest();
     server.handleClient();
-    digitalWrite(green_led, HIGH  );
+    digitalWrite(green_led, HIGH);
     delay(250);
-    digitalWrite(green_led, LOW  );
+    digitalWrite(green_led, LOW);
     delay(250);
   }
   if (pre_program_mode == 2) {
     if (start_ap == 1) {
       start_ap = 0;
       digitalWrite(green_led , HIGH);
-
       setup_wifi();
       microgear.init(KEY, SECRET, ALIAS);
       microgear.connect(APPID);
-      //?
       if (reset_pass == "1") {
-        send_json("RESET", "Password has been change");
+//        send_json("RESET", "Password has been change");
         reset_pass = "0";
         handle_msg();
         Serial.println("--------------------------- password reset----------------------------");
       }
-      //?
+      // ?
     }
-    // wifi check disconnect
 
-    // NEW
+    // wifi check disconnect
     if (WiFi.status() != WL_CONNECTED) {
       setup_wifi();
       if (WiFi.status() == WL_CONNECTED) {
@@ -942,32 +1514,117 @@ void loop() {
       }
     }
 
+    // microgear check disconnect
     if ((WiFi.status() == WL_CONNECTED) && (!microgear.connected())) {
       microgear.init(KEY, SECRET, ALIAS);
       microgear.connect(APPID);
       microgear.loop();
     }
-    if (microgear.connected())
-    {
+
+    if (microgear.connected()) {
       microgear.loop();
     }
-    //END NEW
 
-    //OlD
-    /*if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("check point3");
-      setup_wifi();
-      Serial.println("check point1");
-      microgear.init(KEY, SECRET, ALIAS);
-      microgear.connect(APPID);
-      microgear.loop();
-      }
-      //microgear connect
-      microgear.loop();*/
-    //END OLD
     if (WiFi.status() == WL_CONNECTED) {
+      if (bleState == 0) {
+        digitalWrite(blue_led, LOW);
+        if (digitalRead(ble_button) == HIGH) {
+          Serial.println("Pressing ble button");
+          bleState = 1;
+          bleBtnTimer = timer;
+        }
+      } else if (bleState == 1) {
+        if (digitalRead(ble_button) == LOW) {
+          Serial.println("Press ble button again !!");
+          bleState = 0;
+        } else if (timer - bleBtnTimer >= 1000 && digitalRead(ble_button) == HIGH) {
+          Serial.println("BLE Starting ...");
+          bleState = 2;
+        }
+      } else if (bleState == 2) {
+        //        Serial.println("BLE scanning ...");
+        displayBTScan();
+        BLEScan *pBLEScan = BLEDevice::getScan();
+        pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+        pBLEScan->setActiveScan(true);
+        pBLEScan->start(30);
+        pBLEScan->clearResults();
+        if (bleState == 2) {
+          displayBTScanFailed();
+          delay(5000);
+          displayHome();
+          bleState = 0;
+        }
+      } else if (bleState == 3) {
+        Serial.println("BLE connecting ...");
+        bleState = 4;
+        bleConnectToServer(*pServerAddress);
+      } else if (bleState == 4) {
+        //          Serial.println("BLE waiting ...");
+        digitalWrite(blue_led, HIGH);
+        delay(100);
+        digitalWrite(blue_led, LOW);
+        delay(100);
+        displayConnectingBP();
+        if (timer - bleConnectingTimer >= 10000) {
+          bleState = 0;
+        }
+      } else if (bleState == 5) {
+        //          Serial.println("BLE measuring ...");
+        displayMeasureBP();
+        digitalWrite(blue_led, HIGH);
+      } else if (bleState == 6) {
+        //          Serial.println("BLE sending data ...");
+        digitalWrite(blue_led, HIGH);
+        delay(1000);
+
+        // Send to database
+        JSONbuffer.clear();
+        JsonObject& JSONencoder = JSONbuffer.createObject();
+        JsonObject& JsonData = JSONencoder.createNestedObject("data");
+        JsonData["esp"] = Device_id;
+        JsonData["hbp"] = bleData[3];
+        JsonData["lbp"] = bleData[4];
+        JsonData["hr"] = bleData[5];
+        JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+        Serial.println(JSONmessageBuffer);
+        HTTPClient http;                                                  //Declare object of class HTTPClient
+        http.begin("http://bhcd-api.herokuapp.com/health-info/new");      //Specify request destination
+        http.addHeader("Content-Type", "application/json");               //Specify content-type header
+        int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+        Serial.println(httpCode);
+        String payload = http.getString();                                //Get the response payload
+        Serial.println(payload);                                          //Print request response payload
+        if (httpCode != 201) {
+          return;
+        }
+        http.end();
+
+        // Notification to line bot
+        httpCode = -1;
+        do {
+          HTTPClient http;                                                  //Declare object of class HTTPClient
+          http.begin("http://bhcd-line-bot-noti.herokuapp.com/health-info");      //Specify request destination
+          http.addHeader("Content-Type", "application/json");               //Specify content-type header
+          httpCode = http.POST(JSONmessageBuffer);                          //Send the request
+          Serial.println(httpCode);
+          String payload = http.getString();                                //Get the response payload
+          Serial.println(payload);                                          //Print request response payload
+          http.end();
+        } while (httpCode != 200);
+
+        displayHealthInfo();
+        digitalWrite(blue_led, HIGH);
+        beep(60);
+        delay(100);
+        digitalWrite(blue_led, LOW);
+        beep(60);
+        delay(100);
+        bleState = 0;
+      }
+
       if (state == 0) {
-        //Serial.println("check point2");
+        // State 0 : Normal mode and press button
         digitalWrite(green_led, HIGH);
         if (buttonState == HIGH) {
           unsigned long timerAck = ((timer - preTime) / 1000);
@@ -977,14 +1634,12 @@ void loop() {
         } else {
           preTime = timer;
         }
-
-
       } else if (state == 1) {
-        //Serial.println((timer - timeOut) / 1000);
+        // State 1 : Detect free falling
         buttonState = digitalRead(confirm_button);
 
+        // Wait 8 sec
         if (((timer - timeOut) / 1000) <= 8) {
-          
           digitalWrite(green_led, HIGH);
           digitalWrite(vibration_motor , LOW);
           delay(500);
@@ -992,11 +1647,11 @@ void loop() {
           pinMode(vibration_motor, OUTPUT);
           digitalWrite(vibration_motor , HIGH);
           delay(500);
-          
 
+          // Press more than 1 sec to cancel
           if (buttonState == HIGH) {
             unsigned long timerAck = ((timer - preTime) / 1000);
-            if ( timerAck >= 1.0) {
+            if (timerAck >= 1.0) {
               digitalWrite(green_led, LOW);
               digitalWrite(vibration_motor , HIGH);
               delay(50);
@@ -1005,42 +1660,41 @@ void loop() {
           } else {
             preTime = timer;
           }
-
         } else {
-
+          // Real falling
           DETECT = "FALL";
           ACK = 1;
           state = 2;
         }
-
-
       } else if (state == 2) {
-        //buzzer , vibration on
-        //รอ ack เพื่อเปลี่ยนเสียง
+        // State 2 : send notification
         if (ACK == 1) {
-          
-          send_notification(30 * 1000);
+          //          send_notification(30 * 1000);
+          if (DETECT == "FALL") {
+            sendFalling(30000);
+          } else if (DETECT == "PRESS") {
+            sendHelp(30000);
+          }
           siren();
         } else {
           siren2();
         }
+
+        // Press more than 1 sec to cancel
         buttonState = digitalRead(confirm_button);
-
-        if (buttonState == HIGH ) {
-
+        if (buttonState == HIGH) {
           unsigned long timerAck = ((timer - preTime) / 1000);
           if ( timerAck >= 1) {
-            
-            send_json("HELPACK", "HELPACK");
+            //            send_json("HELPACK", "HELPACK");
+            sendHelpAck();
             analogWrite(buzzer, 0);       // 0 turns it off
             state = 4;
           }
-
         } else {
           preTime = timer;
         }
-
       } else if (state == 3) {
+        // State 3 : if real press send PRESS ack
         buttonState = digitalRead(confirm_button);
         if (buttonState == HIGH) {
 
@@ -1049,15 +1703,16 @@ void loop() {
           state = 2;
         }
       } else if (state == 4) {
+        // State 4 : if real press to stop notification
         buttonState = digitalRead(confirm_button);
         if (buttonState == HIGH) {
 
         } else {
-          ACK = 1; // Enable send massage to line every 30 sec
+          ACK = 1;    // Enable send massage to line every 30 sec
           state = 5;
         }
       } else if (state == 5) {
-        
+        // State 5 : Blink & beep after stop notification
         digitalWrite(green_led, HIGH);
         beep(60);
         digitalWrite(green_led, LOW);
@@ -1065,7 +1720,6 @@ void loop() {
         digitalWrite(green_led, HIGH);
         state = 0;
       }
-
       //read_battery_milsec(600000);
     }
   }
