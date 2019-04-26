@@ -10,8 +10,7 @@
 #include <WiFiClient.h>           // WiFiClient Library
 #include <FS.h>                   // File System Wrapper Library
 #include <SPIFFS.h>               // SPI File System Library
-//#include <Adafruit_BME280.h>
-#include <Adafruit_BMP280.h>
+#include <Adafruit_BME280.h>
 #include <BLEDevice.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -28,6 +27,11 @@ static BLEUUID    notifyUUID("0000fff1-0000-1000-8000-00805f9b34fb");
 static BLEUUID    writeUUID("0000fff2-0000-1000-8000-00805f9b34fb");
 static BLEAddress bpMacAddress = BLEAddress("88:1b:99:07:41:96");
 
+static BLEUUID    serviceOxiUUID("cdeacb80-5235-4c07-8846-93a37ee6b86d");
+static BLEUUID    notifyOxiUUID("cdeacb81-5235-4c07-8846-93a37ee6b86d");
+static BLEUUID    writeOxiUUID("cdeacb82-5235-4c07-8846-93a37ee6b86d");
+static BLEAddress oxiMacAddress = BLEAddress("a4:c1:38:95:18:b6");
+
 static BLEAddress *pServerAddress;
 static boolean doConnect = false;
 static boolean connected = false;
@@ -38,21 +42,21 @@ int bleState = 0;
 long bleBtnTimer = 0;
 long bleConnectingTimer = 0;
 uint8_t* bleData;
+uint8_t* bleOxiData;
+BLEClient*  pClient;
 
 static void notifyCallback(BLERemoteCharacteristic* notifyChar, uint8_t* pData, size_t length, bool isNotify) {
-  bleState = 5;
-  if (length == 8) {
-    //    Serial.print("Systolic blood pressure : ");
-    //    Serial.println(pData[3]);
-    //    systolic = pData[3];
-    //    Serial.print("Diastolic blood pressure : ");
-    //    Serial.println(pData[4]);
-    //    diastolic = pData[4];
-    //    Serial.print("Pulse : ");
-    //    Serial.println(pData[5]);
-    //    pulse = pData[5];
+  if (bleState == 5 && length == 8 & pData[3] > 0 && pData[4] > 0 && pData[5] > 0) {
     bleData = pData;
-    bleState = 6;
+    bleState = 10;
+  }
+}
+
+static void notifyOxiCallback(BLERemoteCharacteristic* notifyChar, uint8_t* pData, size_t length, bool isNotify) {
+  if (bleState == 9 && pData[0] == 129 && pData[2] < 127 && pData[2] > 0) {
+    bleOxiData = pData;
+    pClient->disconnect();
+    bleState = 11;
   }
 }
 
@@ -63,14 +67,13 @@ const uint8_t int_1 = 4;          // Interrupt Pin
 const uint8_t FreefallDetectionThreshold = 50;      // Freefall detection threshold
 const uint8_t FreefallDetectionDuration = 150;      // Freefall detection duration
 
-//Adafruit_BME280 bme;
-Adafruit_BMP280 bmp;
+Adafruit_BME280 bme;
 
 #define vibration_motor  13       // Vibrartion motor pin
 #define buzzer           12       // Buzzer pin
 #define green_led        27       // Green LED Pin
-#define red_led          14       // Red LED Pin
-#define blue_led         26       // Blue LED Pin
+#define red_led          26       // Red LED Pin
+#define blue_led         14       // Blue LED Pin
 
 #define confirm_button   25       // Select Mode Button
 #define battery_adc      35        // Battery Read Pin
@@ -150,11 +153,59 @@ WiFiClient client;
 String uid = "";
 MicroGear microgear(client);
 
-StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
-char JSONmessageBuffer[300];
+void ledGreenOn() {
+  digitalWrite(green_led, LOW);
+  digitalWrite(red_led, HIGH);
+  digitalWrite(blue_led, HIGH);
+}
+
+void ledRedOn() {
+  digitalWrite(green_led, HIGH);
+  digitalWrite(red_led, LOW);
+  digitalWrite(blue_led, HIGH);
+}
+
+void ledBlueOn() {
+  digitalWrite(green_led, HIGH);
+  digitalWrite(red_led, HIGH);
+  digitalWrite(blue_led, LOW);
+}
+
+void ledOff() {
+  digitalWrite(green_led, HIGH);
+  digitalWrite(red_led, HIGH);
+  digitalWrite(blue_led, HIGH);
+}
+
+long readBatTimer = -60000;
+long batVal = 0;
+void readBattery() {
+  if (millis() - readBatTimer >= 60000) {
+    // analogVal = nowVoltage * 4096 / (3.3 * 2)
+    // 2 from voltage devider
+    // 3.3 V, 4096 from analogValue in 3.3 v
+    double batVoltage = 0;
+    for (int i = 0; i < 20; i++) {
+      batVoltage += analogRead(battery_adc);
+      delay(20);
+    }
+    batVoltage = batVoltage / 20;
+    batVal = map(batVoltage, 2172, 2296, 0, 100);
+    if (batVal < 10) {
+      displayBattLow();
+      ledRedOn();
+      sendBattLow();
+    } else if (batVal < 30) {
+      displayBattLow();
+      ledRedOn();
+    }
+    readBatTimer = millis();
+  }
+}
 
 void signupDevice() {
-  JSONbuffer.clear();
+  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+  char JSONmessageBuffer[300];
   JsonObject& JSONencoder = JSONbuffer.createObject();
   JsonObject& JsonData = JSONencoder.createNestedObject("data");
   JsonData["espname"] = Device_id;
@@ -174,14 +225,16 @@ void signupDevice() {
     Serial.println("Device is signed up");
   } else {
     Serial.println("Sign up device error");
+    signupDevice();
   }
   http.end();                                                       //Close connection
 }
 
-long deviceOnlineTimer = -1800000;
+long deviceOnlineTimer = -3600000;
 void deviceOnline(long t) {
   if (millis() - deviceOnlineTimer >= t) {
-    JSONbuffer.clear();
+    StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+    char JSONmessageBuffer[300];
     JsonObject& JSONencoder = JSONbuffer.createObject();
     JsonObject& JsonData = JSONencoder.createNestedObject("data");
     JsonData["esp"] = Device_id;
@@ -197,11 +250,13 @@ void deviceOnline(long t) {
     if (httpCode == 200) {
       Serial.println("Device online");
       deviceOnlineTimer = millis();
+      displayHome();
     } else {
       Serial.println("ERROR");
-      delay(1000);
+      displayRegisterDevicePls();
+      delay(10000);
     }
-    deviceOnlineTimer = millis();
+    //    deviceOnlineTimer = millis();
     http.end();                                                       //Close connection
   }
 }
@@ -209,7 +264,8 @@ void deviceOnline(long t) {
 long fallingNotiTimer;
 void sendFalling(int t) {
   if (millis() - fallingNotiTimer >= t) {
-    JSONbuffer.clear();
+    StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+    char JSONmessageBuffer[300];
     JsonObject& JSONencoder = JSONbuffer.createObject();
     JsonObject& JsonData = JSONencoder.createNestedObject("data");
     JsonData["esp"] = Device_id;
@@ -229,7 +285,7 @@ void sendFalling(int t) {
       Serial.println("ERROR");
       delay(1000);
     }
-    fallingNotiTimer = millis();
+    //    fallingNotiTimer = millis();
     http.end();                                                       //Close connection
   }
 }
@@ -237,7 +293,8 @@ void sendFalling(int t) {
 long helpNotiTimer;
 void sendHelp(int t) {
   if (millis() - helpNotiTimer >= t) {
-    JSONbuffer.clear();
+    StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+    char JSONmessageBuffer[300];
     JsonObject& JSONencoder = JSONbuffer.createObject();
     JsonObject& JsonData = JSONencoder.createNestedObject("data");
     JsonData["esp"] = Device_id;
@@ -257,13 +314,14 @@ void sendHelp(int t) {
       Serial.println("ERROR");
       delay(1000);
     }
-    helpNotiTimer = millis();
+    //    helpNotiTimer = millis();
     http.end();                                                       //Close connection
   }
 }
 
 void sendHelpAck() {
-  JSONbuffer.clear();
+  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+  char JSONmessageBuffer[300];
   JsonObject& JSONencoder = JSONbuffer.createObject();
   JsonObject& JsonData = JSONencoder.createNestedObject("data");
   JsonData["esp"] = Device_id;
@@ -287,7 +345,8 @@ void sendHelpAck() {
 }
 
 void sendHelpPreAck() {
-  JSONbuffer.clear();
+  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+  char JSONmessageBuffer[300];
   JsonObject& JSONencoder = JSONbuffer.createObject();
   JsonObject& JsonData = JSONencoder.createNestedObject("data");
   JsonData["esp"] = Device_id;
@@ -310,18 +369,150 @@ void sendHelpPreAck() {
   http.end();                                                       //Close connection
 }
 
+void sendHealthInfo() {
+  displayHealthInfo();
+
+  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+  char JSONmessageBuffer[300];
+  JsonObject& JSONencoder = JSONbuffer.createObject();
+  JsonObject& JsonData = JSONencoder.createNestedObject("data");
+  JsonData["esp"] = Device_id;
+  JsonData["hbp"] = bleData[3];
+  JsonData["lbp"] = bleData[4];
+  JsonData["hr"] = bleData[5];
+  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+  Serial.println(JSONmessageBuffer);
+  HTTPClient http;                                                  //Declare object of class HTTPClient
+  http.begin("http://bhcd-api.herokuapp.com/health-info/new");      //Specify request destination
+  http.addHeader("Content-Type", "application/json");               //Specify content-type header
+  int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+  Serial.println(httpCode);
+  String payload = http.getString();                                //Get the response payload
+  Serial.println(payload);                                          //Print request response payload
+  if (httpCode != 201) {
+    delay(1000);
+    sendHealthInfo();
+  } else if (httpCode >= 500) {
+    return;
+  }
+  http.end();
+
+  // Notification to line bot
+  httpCode = -1;
+
+  // Send data 10 rounds when not complete
+  for (int i = 0; i < 10; i++) {
+    if (httpCode == 200) {
+      ledBlueOn();
+      beep(60);
+      delay(100);
+      ledOff();
+      beep(60);
+      delay(5000);
+      return;
+    }
+    HTTPClient http;                                                    //Declare object of class HTTPClient
+    http.begin("http://bhcd-line-bot-noti.herokuapp.com/health-info");  //Specify request destination
+    http.addHeader("Content-Type", "application/json");                 //Specify content-type header
+    httpCode = http.POST(JSONmessageBuffer);                            //Send the request
+    Serial.println(httpCode);
+    String payload = http.getString();                                  //Get the response payload
+    Serial.println(payload);                                            //Print request response payload
+    http.end();
+  }
+}
+
+void sendHealthInfoOxi() {
+  displayHealthInfoOxi();
+
+  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+  char JSONmessageBuffer[300];
+  JsonObject& JSONencoder = JSONbuffer.createObject();
+  JsonObject& JsonData = JSONencoder.createNestedObject("data");
+  JsonData["esp"] = Device_id;
+  JsonData["spo2"] = bleOxiData[2];
+  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+  Serial.println(JSONmessageBuffer);
+  HTTPClient http;                                                  //Declare object of class HTTPClient
+  http.begin("http://bhcd-api.herokuapp.com/health-info-oxi/new");      //Specify request destination
+  http.addHeader("Content-Type", "application/json");               //Specify content-type header
+  int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+  Serial.println(httpCode);
+  String payload = http.getString();                                //Get the response payload
+  Serial.println(payload);                                          //Print request response payload
+  if (httpCode != 201) {
+    delay(1000);
+    sendHealthInfoOxi();
+  } else if (httpCode >= 500) {
+    return;
+  }
+  http.end();
+
+  // Notification to line bot
+  httpCode = -1;
+
+  // Send data 10 rounds when not complete
+  for (int i = 0; i < 10; i++) {
+    if (httpCode == 200) {
+      ledBlueOn();
+      beep(60);
+      delay(100);
+      ledOff();
+      beep(60);
+      delay(5000);
+      return;
+    }
+    HTTPClient http;                                                    //Declare object of class HTTPClient
+    http.begin("http://bhcd-line-bot-noti.herokuapp.com/health-info-oxi");  //Specify request destination
+    http.addHeader("Content-Type", "application/json");                 //Specify content-type header
+    httpCode = http.POST(JSONmessageBuffer);                            //Send the request
+    Serial.println(httpCode);
+    String payload = http.getString();                                  //Get the response payload
+    Serial.println(payload);                                            //Print request response payload
+    http.end();
+  }
+}
+
+void sendBattLow() {
+  StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
+  char JSONmessageBuffer[300];
+  JsonObject& JSONencoder = JSONbuffer.createObject();
+  JsonObject& JsonData = JSONencoder.createNestedObject("data");
+  JsonData["esp"] = Device_id;
+  JsonData["batt"] = batVal;
+  JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+  Serial.println(JSONmessageBuffer);
+  HTTPClient http;                                                  //Declare object of class HTTPClient
+  http.begin("http://bhcd-line-bot-noti.herokuapp.com/low-batt");   //Specify request destination
+  http.addHeader("Content-Type", "application/json");               //Specify content-type header
+  int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
+  Serial.println(httpCode);
+  String payload = http.getString();                                //Get the response payload
+  Serial.println(payload);                                          //Print request response payload
+  if (httpCode == 200) {
+    Serial.println("It's OK");
+  } else {
+    Serial.println("ERROR");
+    delay(1000);
+    sendBattLow();
+  }
+  http.end();
+}
+
 void onMsghandler(char *topic, uint8_t* msg, unsigned int msglen) { //
-  Serial.print("Microgear incoming message : ");
-  Serial.println((char *)msg);
+  Serial.print("Microgear incoming message --> ");
+  msg[msglen] = '\0';
   String stringOne = (char *)msg;
-  if (stringOne.equals("ACK") && state == 2) {
+  Serial.println(stringOne);
+  if (stringOne.equals("ACK") && state == 2 && ACK == 1) {
     sendHelpPreAck();
+    ACK = 0;
   }
 }
 
 void onConnected(char *attribute, uint8_t* msg, unsigned int msglen) {
-  microgear.setName(ALIAS);
-  deviceOnline(1800000);
+  Serial.println("Microgear Connected");
+  microgear.setAlias(ALIAS);
 }
 
 #define LEDC_CHANNEL_0     0          // use first channel of 16 channels (started from zero)
@@ -349,70 +540,6 @@ void beep(unsigned char delayms) {
   delay(delayms);          // wait for a delayms ms
   analogWrite(LEDC_CHANNEL_0, 0);       // 0 turns it off
   delay(delayms);          // wait for a delayms ms
-}
-
-int8_t readbattery = 1 ;
-void read_battery_milsec(unsigned long t) {
-  timerBat = millis();
-  if (readbattery == 1) {
-    sensorValue = analogRead( battery_adc);
-    preTimeBat = millis();
-    if (sensorValue < 820 ) {//เธ�เน�เธญเธขเธ�เธงเน�เธฒ3.5V เธ�เธฐเน€เธ•เธทเธญเธ�//837
-      Serial.println(sensorValue);//*3.3/1024
-      digitalWrite(red_led, HIGH);
-      if (WiFi.status() == WL_CONNECTED) {
-//        send_json("CHECK", "LOW");
-      }
-
-    } else if (sensorValue < 850 ) {
-      digitalWrite(red_led, HIGH);
-    }
-    else {
-      digitalWrite(red_led, LOW);
-    }
-  }
-
-  if (timerBat - preTimeBat > t) {
-    sensorValue = analogRead( battery_adc);
-    Serial.println(timerBat - preTimeBat);
-    if (sensorValue < 820 ) {//เธ�เน�เธญเธขเธ�เธงเน�เธฒ3.5V เธ�เธฐเน€เธ•เธทเธญเธ�//837
-      Serial.println(sensorValue);//*3.3/1024
-      digitalWrite(red_led, HIGH);
-      if (WiFi.status() == WL_CONNECTED) {
-//        send_json("CHECK", "LOW");
-      }
-
-    } else if (sensorValue < 850 ) {
-      digitalWrite(red_led, HIGH);
-    }
-    else {
-      digitalWrite(red_led, LOW);
-    }
-    preTimeBat = millis();
-
-  } else {
-    readbattery = 0;
-  }
-
-}
-
-
-void check_status(unsigned long t ) {
-  timerBat = millis();
-  if (timerBat - preTime2Bat > t) {
-    preTime2Bat = timerBat;
-//    send_json("CHECK", "CHECK");
-    preTime2Bat = timerBat;
-  }
-}
-
-void send_notification(unsigned long t) {
-  timerBat = millis();
-  if (timerBat - preTime2Bat > t) {
-    preTime2Bat = timerBat;
-//    send_json("HELP", DETECT);
-    preTime2Bat = timerBat;
-  }
 }
 
 void web_page() {
@@ -496,7 +623,6 @@ void handle_msg() {
   Serial.println("from web");
   String ssid_msg ;
   String password_msg ;
-
   for (int i = 0; i < server.args(); i++) {
     if (server.argName(i) == "s") {
       ssid_msg = server.arg(i);
@@ -561,7 +687,7 @@ void handle_msg() {
   if (!file2) {
     Serial.println("file open failed!");
   } else {
-    Serial.println("file open success:)");
+    Serial.println("file open success :)");
     for (int i = 0; i < 4; i++) {
       String ssid = ssid_list[i];
       String password = password_list[i];
@@ -607,21 +733,23 @@ void setup_wifi() {
   WiFi.mode(WIFI_STA);
   for (int j = 0 ; j < 4 ; j++) {
     if (WiFi.status() != WL_CONNECTED) {
-      digitalWrite(green_led, HIGH);
+      //      digitalWrite(green_led, LOW);
+      ledGreenOn();
       delay(100);
       beep(750);
-      digitalWrite(green_led, LOW);
+      //      digitalWrite(green_led, HIGH);
+      ledOff();
       current_ssid = ssid_list[j];
       char ssid1[current_ssid.length()];
       current_ssid.toCharArray(ssid1, current_ssid.length());
       Serial.println(current_ssid.length());
       Serial.println(ssid1);
-      current_password = password_list[j];
 
+      current_password = password_list[j];
       char password1[current_password.length()];
       current_password.toCharArray(password1, current_password.length());
-      Serial.println( current_password.length());
-      Serial.println(password1);
+      //      Serial.println( current_password.length());
+      //      Serial.println(password1);
       n = WiFi.scanNetworks();
       for (int k = 0; k < n ; k++) {
         Serial.println("wifi scan " + WiFi.SSID(k));
@@ -631,11 +759,13 @@ void setup_wifi() {
           WiFi.begin(ssid1, password1);
           for (int i = 0 ; i < 20; i ++) {
             if (WiFi.status() != WL_CONNECTED) {
-              digitalWrite(green_led, LOW);
+              //              digitalWrite(green_led, HIGH);
+              ledOff();
               delay(250);
               beep(100);
               Serial.print(".");
-              digitalWrite(green_led, HIGH);
+              //              digitalWrite(green_led, LOW);
+              ledGreenOn();
               delay(250);
             }
           }
@@ -648,14 +778,13 @@ void setup_wifi() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     //digitalWrite(wifi_led, HIGH);
+    ledGreenOn();
     Serial.println("");
     Serial.println("WiFi connected");
     Serial.println("IP address: ");
     Serial.println(WiFi.localIP());
     signupDevice();
     displayConnectedWiFi();
-    delay(5000);
-    displayHome();
   } else {
     displayFailConnectWiFi();
   }
@@ -685,10 +814,10 @@ void prepareFile() {
   } else {
     Serial.println("file open success:)");
     //  Serial.write(file.read());
+    Serial.println("====== file have data =========");
     while (file.available()) {
       //  Serial.write(file.read());
       //Lets read line by line from the file
-      Serial.println("====== file have data =========");
       String line = file.readStringUntil('\n');
       if (line.startsWith("ssid = ")) {
         ssid_list[s] = line.substring(7);
@@ -706,71 +835,60 @@ void prepareFile() {
         current_password.trim();
         char password1[current_password.length()];
         current_password.toCharArray(password1, current_password.length());
-        Serial.println(current_password.length());
-        Serial.println(current_password);
-
+        //        Serial.println(current_password.length());
+        //        Serial.println(current_password);
         p++;
       } else if (line.startsWith("api key = ")) {
         Api_key = line.substring(10);
         Api_key.trim();
-        Serial.println(Api_key.length());
-        Serial.println(Api_key);
-
+        //        Serial.println(Api_key.length());
+        //        Serial.println(Api_key);
       } else if (line.startsWith("user key = ")) {
         User_key = line.substring(11);
         User_key.trim();
-        Serial.println(User_key.length());
-        Serial.println(User_key);
+        //        Serial.println(User_key.length());
+        //        Serial.println(User_key);
       } else if (line.startsWith("reset = ")) {
         reset_pass = line.substring(8);
         reset_pass.trim();
-        Serial.println(reset_pass.length());
-        Serial.println(reset_pass);
-
+        //        Serial.println(reset_pass.length());
+        //        Serial.println(reset_pass);
       } else if (line.startsWith("lastname = ")) {
         lastname = line.substring(11);
         lastname.trim();
-        Serial.println(lastname.length());
-        Serial.println(lastname);
-
+        //        Serial.println(lastname.length());
+        //        Serial.println(lastname);
       } else if (line.startsWith("bloodtype = ")) {
         bloodtype = line.substring(12);
         bloodtype.trim();
-        Serial.println(bloodtype.length());
-        Serial.println(bloodtype);
-
+        //        Serial.println(bloodtype.length());
+        //        Serial.println(bloodtype);
       } else if (line.startsWith("weight = ")) {
         weight = line.substring(9);
         weight.trim();
-        Serial.println(weight.length());
-        Serial.println(weight);
-
+        //        Serial.println(weight.length());
+        //        Serial.println(weight);
       } else if (line.startsWith("height = ")) {
         height = line.substring(9);
         height.trim();
-        Serial.println(height.length());
-        Serial.println(height);
-
+        //        Serial.println(height.length());
+        //        Serial.println(height);
       } else if (line.startsWith("brithday = ")) {
         brithday = line.substring(11);
         brithday.trim();
-        Serial.println(brithday.length());
-        Serial.println(brithday);
-
+        //        Serial.println(brithday.length());
+        //        Serial.println(brithday);
       } else if (line.startsWith("address = ")) {
         address = line.substring(10);
         address.trim();
-        Serial.println(address.length());
-        Serial.println(address);
-
+        //        Serial.println(address.length());
+        //        Serial.println(address);
       } else if (line.startsWith("moreinfo = ")) {
         moreinfo = line.substring(11);
         moreinfo.trim();
-        Serial.println(moreinfo.length());
-        Serial.println(moreinfo);
-
+        //        Serial.println(moreinfo.length());
+        //        Serial.println(moreinfo);
       }
-
     }
     if (s == 3) {
       s = 0;
@@ -852,60 +970,79 @@ void setup_apmode() {
   server.begin();                                    // Start the server
 }
 
+bool isSiren = false;
+bool isSiren2 = false;
+
 void siren() {
-  int freq;
-  for (freq = 500; freq < 1800; freq += 5)
-  {
+  isSiren = true;
+  isSiren2 = false;
+}
 
-    digitalWrite(green_led, HIGH);
-    pinMode(vibration_motor, OUTPUT);
-    digitalWrite(vibration_motor , LOW);
-    tone(buzzer, freq, timeBuzzer);     // Beep pin, freq, time
-    delay(5);
-  }
-  for (freq = 1800; freq > 500; freq -= 5)
-  {
-
-    tone(buzzer, freq, timeBuzzer);     // Beep pin, freq, time
-
-    digitalWrite(green_led, LOW);
-    pinMode(vibration_motor, INPUT);
-    delay(5);
+void sirenTask(void *p) {
+  while (1) {
+    if (isSiren) {
+      for (int freq = 500; freq < 1800; freq += 5) {
+        //    digitalWrite(green_led, LOW);
+        ledGreenOn();
+        pinMode(vibration_motor, OUTPUT);
+        digitalWrite(vibration_motor , HIGH);
+        tone(LEDC_CHANNEL_0, freq, timeBuzzer);     // Beep pin, freq, time
+        delay(5);
+      }
+      for (int freq = 1800; freq > 500; freq -= 5) {
+        tone(LEDC_CHANNEL_0, freq, timeBuzzer);     // Beep pin, freq, time
+        //    digitalWrite(green_led, HIGH);
+        ledOff();
+        pinMode(vibration_motor, INPUT);
+        delay(5);
+      }
+    } else {
+      delay(200);
+    }
   }
 }
 
 void siren2() {
-  Serial.println("vibra5");
-  int freq;
-  for (freq = 600; freq < 1200; freq += 5)
-  {
+  isSiren = false;
+  isSiren2 = true;
+}
 
-    digitalWrite(green_led, HIGH);
-    pinMode(vibration_motor, OUTPUT);
-    digitalWrite(green_led , LOW);
-    tone(buzzer, freq, timeBuzzer);     // Beep pin, freq, time
-    delay(5);
-  }
-  for (freq = 1200; freq > 600; freq -= 5)
-  {
-
-    tone(buzzer, freq, timeBuzzer);     // Beep pin, freq, time
-
-    digitalWrite(green_led, LOW);
-    pinMode(vibration_motor, INPUT);
-    delay(5);
+void siren2Task(void *p) {
+  while (1) {
+    if (isSiren2) {
+      for (int freq = 600; freq < 1200; freq += 5) {
+        //    digitalWrite(green_led, LOW);
+        ledGreenOn();
+        pinMode(vibration_motor, OUTPUT);
+        digitalWrite(vibration_motor , HIGH);
+        ledOff();
+        tone(LEDC_CHANNEL_0, freq, timeBuzzer);     // Beep pin, freq, time
+        delay(5);
+      }
+      for (int freq = 1200; freq > 600; freq -= 5) {
+        tone(LEDC_CHANNEL_0, freq, timeBuzzer);     // Beep pin, freq, time
+        //    digitalWrite(green_led, HIGH);
+        ledOff();
+        pinMode(vibration_motor, INPUT);
+        delay(5);
+      }
+    } else {
+      delay(200);
+    }
   }
 }
 
+void stopSiren() {
+  isSiren = false;
+  isSiren2 = false;
+  ledGreenOn();
+  pinMode(vibration_motor, INPUT);
+  analogWrite(buzzer, 0);
+}
+
 void doInt() {
-  //  bme.takeForcedMeasurement();
-  Serial.print("Approx. Altitude = ");
-  //  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
-  Serial.print(bmp.readAltitude(1013.25));
-  Serial.println(" m");
-  delay(41);
   timeOut = timer;
-  state = 1;
+  state = 10;
 }
 
 void checkSettingsMPU() {
@@ -969,15 +1106,34 @@ void checkSettingsMPU() {
   Serial.println();
 }
 
-// BLE
+class MyBLEClientCallback : public BLEClientCallbacks {
+    void onConnect(BLEClient* pclient) {
+      Serial.print("onConnect on state : ");
+      Serial.println(bleState);
+    }
+
+    void onDisconnect(BLEClient* pclient) {
+      Serial.print("onDisconnect : ");
+      Serial.println(bleState);
+      if (bleState >= 2 && bleState <= 5) {
+        bleState = 6;
+      } else if (bleState >= 6 && bleState <= 9) {
+        displayHome();
+        bleState = 0;
+      }
+    }
+};
+
 void bleConnectToServer(BLEAddress pAddress) {
   bleConnectingTimer = millis();
 
   Serial.print("Forming a connection to ");
   Serial.println(pAddress.toString().c_str());
 
-  BLEClient*  pClient  = BLEDevice::createClient();
+  pClient  = BLEDevice::createClient();
   Serial.println(" - Created client");
+
+  pClient->setClientCallbacks(new MyBLEClientCallback());
 
   // Connect to the remove BLE Server.
   pClient->connect(pAddress);
@@ -1021,6 +1177,59 @@ void bleConnectToServer(BLEAddress pAddress) {
   bleState = 5;
 }
 
+void bleConnectToServerOxi(BLEAddress pAddress) {
+  bleConnectingTimer = millis();
+
+  Serial.print("Forming a connection to ");
+  Serial.println(pAddress.toString().c_str());
+
+  pClient  = BLEDevice::createClient();
+  Serial.println(" - Created client");
+
+  pClient->setClientCallbacks(new MyBLEClientCallback());
+
+  // Connect to the remove BLE Server.
+  pClient->connect(pAddress);
+  Serial.println(" - Connected to server");
+
+  // Obtain a reference to the service we are after in the remote BLE server.
+  BLERemoteService* pRemoteService = pClient->getService(serviceOxiUUID);
+  Serial.println(serviceOxiUUID.toString().c_str());
+  if (pRemoteService == nullptr) {
+    Serial.print("Failed to find our service UUID: ");
+    Serial.println(serviceOxiUUID.toString().c_str());
+    return;
+  }
+
+  // Obtain a reference to the characteristic in the service of the remote BLE server.
+  notifyChar = pRemoteService->getCharacteristic(notifyOxiUUID);
+  writeChar = pRemoteService->getCharacteristic(writeOxiUUID);
+
+  Serial.println(notifyOxiUUID.toString().c_str());
+  if (notifyChar == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(notifyUUID.toString().c_str());
+    return;
+  }
+  Serial.println(writeOxiUUID.toString().c_str());
+  if (writeChar == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(writeUUID.toString().c_str());
+    return;
+  }
+
+  notifyChar->registerForNotify(notifyOxiCallback);
+
+  const uint8_t notificationOnline[] = {0x1, 0x0};
+  notifyChar->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)notificationOnline, 2, true);
+
+  const byte startPressure[] = {0, -95, 17, 0};
+  writeChar->writeValue((uint8_t*)startPressure, 6, true);
+
+  // BLE Connected
+  bleState = 9;
+}
+
 /**
    Scan for BLE servers and find the first one that advertises the address we are looking for.
 */
@@ -1030,18 +1239,35 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         Called for each advertising BLE server.
     */
     void onResult(BLEAdvertisedDevice advertisedDevice) {
-//      Serial.print("BLE Advertised Device found: ");
-//      Serial.println(advertisedDevice.toString().c_str());
-      digitalWrite(blue_led, HIGH);
-      delay(50);
-      digitalWrite(blue_led, LOW);
-      delay(50);
-      if (advertisedDevice.getAddress().equals(bpMacAddress)) {
-        advertisedDevice.getScan()->stop();
-        Serial.println("Found our blood pressure!");
-//        Serial.println(advertisedDevice.getAddress().toString().c_str());
-        pServerAddress = new BLEAddress(advertisedDevice.getAddress());
-        bleState = 3;
+      //      Serial.print("BLE Advertised Device found: ");
+      //      Serial.println(advertisedDevice.toString().c_str());
+      if (bleState == 2) {
+        //        digitalWrite(blue_led, LOW);
+        ledBlueOn();
+        delay(50);
+        //        digitalWrite(blue_led, HIGH);
+        ledOff();
+        delay(50);
+        if (advertisedDevice.getAddress().equals(bpMacAddress)) {
+          advertisedDevice.getScan()->stop();
+          Serial.println("Found our blood pressure!");
+          //        Serial.println(advertisedDevice.getAddress().toString().c_str());
+          pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+          bleState = 3;
+        }
+      } else if (bleState == 6) {
+        //        digitalWrite(blue_led, LOW);
+        ledBlueOn();
+        delay(50);
+        //        digitalWrite(blue_led, HIGH);
+        ledOff();
+        delay(50);
+        if (advertisedDevice.getAddress().equals(oxiMacAddress)) {
+          advertisedDevice.getScan()->stop();
+          Serial.println("Found our oximeter!");
+          pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+          bleState = 7;
+        }
       }
     }
 };
@@ -1149,7 +1375,7 @@ void displayBTScan() {
   display.setTextSize(2); // Draw 2X-scale text
   display.setTextColor(WHITE);
   display.setCursor(0, 16);
-  display.println(F("BT"));
+  display.println(F("BT BP"));
   display.println(F("SCAN"));
   display.display();      // Show initial text
 }
@@ -1166,7 +1392,7 @@ void displayBTScanFailed() {
   display.setTextSize(2); // Draw 2X-scale text
   display.setTextColor(WHITE);
   display.setCursor(0, 16);
-  display.println(F("SCAN"));
+  display.println(F("BP SCAN"));
   display.println(F("FAIL"));
   display.display();      // Show initial text
 }
@@ -1205,6 +1431,74 @@ void displayMeasureBP() {
   display.display();      // Show initial text
 }
 
+void displayBTOxiScan() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("BT OXI"));
+  display.println(F("SCAN"));
+  display.display();      // Show initial text
+}
+
+void displayBTOxiScanFailed() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("OXI SCAN"));
+  display.println(F("FAIL"));
+  display.display();      // Show initial text
+}
+
+void displayConnectingOxi() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("CONNECTING"));
+  display.println(F("OXIMETER"));
+  display.display();      // Show initial text
+}
+
+void displayMeasureOxi() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("MEASURE"));
+  display.println(F("OXIMETER"));
+  display.display();      // Show initial text
+}
+
 void displayHealthInfo() {
   display.clearDisplay();
   stateWF = 1;
@@ -1218,8 +1512,24 @@ void displayHealthInfo() {
   display.setTextColor(WHITE);
   display.setCursor(0, 16);
   display.println("SYS/DIS : " + String(bleData[3]) + "/" + String(bleData[4]));
-                  display.println("PULSE : " + String(bleData[5]));
-                  display.display();      // Show initial text
+  display.println("PULSE : " + String(bleData[5]));
+  display.display();      // Show initial text
+}
+
+void displayHealthInfoOxi() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 0;
+  stateAC = 1;
+  displayBatt();
+  iconWiFi();
+  iconActive();
+  iconBT();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println("SPO2 : " + String(bleOxiData[2]));
+  display.display();
 }
 
 void displayConnectedBT() {
@@ -1240,6 +1550,24 @@ void displayConnectedBT() {
   delay(2000);
 }
 
+void displayFalling() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 1;
+  stateAC = 0;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.display();
+  display.setTextSize(3); // Draw 2X-scale text
+  display.setCursor(0, 20);
+  display.setTextColor(INVERSE);
+  display.println(F("FALLING!!"));
+  delay(1000);
+  display.display();      // Show initial text
+}
+
 void displayHelp() {
   display.clearDisplay();
   stateWF = 1;
@@ -1256,7 +1584,6 @@ void displayHelp() {
   display.println(F("HELP!!"));
   delay(1000);
   display.display();      // Show initial text
-  delay(1000);
 }
 
 void displayOK() {
@@ -1275,15 +1602,66 @@ void displayOK() {
   display.display();      // Show initial text
 }
 
+void displayAP() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 1;
+  stateAC = 0;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.setTextSize(2); // Draw 2X-scale text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println(F("AP MODE"));
+  display.display();      // Show initial text
+}
+
+void displayRegisterDevicePls() {
+  display.clearDisplay();
+  stateWF = 1;
+  stateBT = 1;
+  stateAC = 0;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println("REGISTER");
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.println(Device_id);
+  display.display();
+}
+
+void displayBattLow() {
+  display.clearDisplay();
+  stateWF = 0;
+  stateBT = 0;
+  stateAC = 0;
+  displayBatt();
+  iconWiFi();
+  iconBT();
+  iconActive();
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16);
+  display.println("LOW BATT");
+  display.setTextColor(WHITE);
+  display.println(String(batVal) + "%");
+  display.display();
+}
+
 // Connection and icon
 void displayBatt() {
   display.setTextSize(1); // Draw 2X-scale tex
   display.setTextColor(WHITE);
   display.setCursor(100, 1);
-  int n = 17;
-  display.print(n);
+  display.print(batVal);
   display.print(F(" %"));
-  //  display.display();      // Show initial text
 }
 
 void iconWiFi() {
@@ -1337,10 +1715,31 @@ void iconActive() {
   //  display.display();      // Show initial text
 }
 
+long bmeTimer = 1000;
+double bmeHeightNow = 0;
+void bmeNow() {
+  if (millis() - bmeTimer >= 800 && state != 10) {
+    double allHeight = 0;
+    int hCount = 0;
+    for (int i = 0; i < 20; i++) {
+      bme.takeForcedMeasurement();
+      double h = bme.readAltitude(SEALEVELPRESSURE_HPA);
+      if (h > 0) {
+        allHeight += h;
+        hCount++;
+      }
+      bmeTimer = millis();
+      delay(10);
+    }
+    if (hCount > 0)
+      bmeHeightNow = allHeight / hCount;
+  }
+}
+
 void setup() {
-  
+
   Device_id.toCharArray(ALIAS, sizeof(ALIAS));
-  
+
   microgear.on(MESSAGE, onMsghandler);
   microgear.on(CONNECTED, onConnected);
 
@@ -1378,28 +1777,28 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(int_1), doInt, RISING);
 
 
-  while (!bmp.begin(BMP280_ADDRESS) && !bmp.begin(BMP280_ADDRESS_ALT)) {
-    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
-    delay(1000);
-  }
-  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
-                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
-                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
-                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
-                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
-
-  //  while (!bme.begin()) {
-  //    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+  //  while (!bmp.begin(BMP280_ADDRESS) && !bmp.begin(BMP280_ADDRESS_ALT)) {
+  //    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+  //    delay(1000);
   //  }
-  //  Serial.println("-- Indoor Navigation Scenario --");
-  //  Serial.println("normal mode, 16x pressure / 2x temperature / 1x humidity oversampling,");
-  //  Serial.println("0.5ms standby period, filter 16x");
-  //  bme.setSampling(Adafruit_BME280::MODE_NORMAL,
-  //                  Adafruit_BME280::SAMPLING_X2,  // temperature
-  //                  Adafruit_BME280::SAMPLING_X16, // pressure
-  //                  Adafruit_BME280::SAMPLING_X1,  // humidity
-  //                  Adafruit_BME280::FILTER_X16,
-  //                  Adafruit_BME280::STANDBY_MS_0_5 );
+  //  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+  //                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+  //                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+  //                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+  //                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+
+  while (!bme.begin()) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+  }
+  Serial.println("-- Indoor Navigation Scenario --");
+  Serial.println("normal mode, 16x pressure / 2x temperature / 1x humidity oversampling,");
+  Serial.println("0.5ms standby period, filter 16x");
+  bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+                  Adafruit_BME280::SAMPLING_X2,  // temperature
+                  Adafruit_BME280::SAMPLING_X16, // pressure
+                  Adafruit_BME280::SAMPLING_X1,  // humidity
+                  Adafruit_BME280::FILTER_X16,
+                  Adafruit_BME280::STANDBY_MS_0_5 );
 
   // ##### OLED #####
   oledTwoWire.begin(16, 17);
@@ -1415,9 +1814,9 @@ void setup() {
   digitalWrite(vibration_motor, HIGH);
   pinMode(confirm_button, INPUT);
   pinMode(green_led, OUTPUT);
-  digitalWrite(green_led, LOW);
+  //  digitalWrite(green_led, HIGH);
   pinMode(red_led, OUTPUT);
-  digitalWrite(red_led, LOW);
+  //  digitalWrite(red_led, HIGH);
   pinMode(battery_adc, INPUT);
   pinMode(buzzer , OUTPUT);
   digitalWrite(buzzer, LOW);
@@ -1433,14 +1832,21 @@ void setup() {
 
   // BLE
   pinMode(blue_led, OUTPUT);
-  digitalWrite(blue_led, LOW);
+  //  digitalWrite(blue_led, LOW);
   pinMode(ble_button, INPUT);
   BLEDevice::init("");
+
+  // Siren Task
+  xTaskCreate(&sirenTask, "sirenTask", 2048, NULL, 5, NULL);
+  xTaskCreate(&siren2Task, "siren2Task", 2048, NULL, 6, NULL);
+
+  ledOff();
 }
 
 void loop() {
   timer = millis();
   buttonState = digitalRead(confirm_button);
+  bmeNow();
   /*#######################################################
     เธ—เธณเธ�เธฒเธ�เธซเธฅเธฑเธ�เธ�เธฒเธ�เน€เธ�เธฃเธทเน�เธญเธ�เธ�เธฃเน�เธญเธกเน�เธ�เน�เธ�เธฒเธ� 10 เธงเธดเธ�เธฒเธ—เธต
     pre_program_mode | เน€เธ�เธฅเธตเน�เธขเธ�เน€เธกเธทเน�เธญ           | เน€เธ�เน�เธฒเธชเธนเน�เน�เธซเธกเธ”
@@ -1450,7 +1856,8 @@ void loop() {
     2                | เน�เธกเน�เธกเธตเธ�เธฒเธฃเธ�เธ”เธ�เธธเน�เธก       | Normal mode
     #######################################################*/
   if (pre_program_mode == 0) {
-    digitalWrite(green_led, HIGH );
+    //    digitalWrite(green_led, LOW);
+    ledGreenOn();
     if (((timer - timeOut) / 1000) < 10) {
       if (buttonState == HIGH) {
         unsigned long timerAck = ((timer - preTime) / 1000);
@@ -1459,9 +1866,11 @@ void loop() {
           pre_program_mode = 1;
         }
       } else {
-        digitalWrite(green_led , HIGH);
+        //        digitalWrite(green_led , LOW);
+        ledGreenOn();
         delay(500);
-        digitalWrite(green_led , LOW);
+        //        digitalWrite(green_led , HIGH);
+        ledOff();
         delay(500);
         preTime = timer;
 
@@ -1469,11 +1878,8 @@ void loop() {
     } else {
       pre_program_mode = 2;
     }
-  }
-  //buttonState = digitalRead(buttonPin);
-  // check if the pushbutton is pressed.
-  // if it is, the buttonState is HIGH:
-  if (pre_program_mode == 1) {
+  } else if (pre_program_mode == 1) {
+    displayAP();
     if (start_ap == 1) {
       setup_apmode();
       start_ap = 0;
@@ -1483,20 +1889,22 @@ void loop() {
     }
     dnsServer.processNextRequest();
     server.handleClient();
-    digitalWrite(green_led, HIGH);
+    //    digitalWrite(green_led, LOW);
+    ledGreenOn();
     delay(250);
-    digitalWrite(green_led, LOW);
+    //    digitalWrite(green_led, HIGH);
+    ledOff();
     delay(250);
-  }
-  if (pre_program_mode == 2) {
+  } else if (pre_program_mode == 2) {
     if (start_ap == 1) {
       start_ap = 0;
-      digitalWrite(green_led , HIGH);
+      //      digitalWrite(green_led , LOW);
+      ledGreenOn();
       setup_wifi();
       microgear.init(KEY, SECRET, ALIAS);
       microgear.connect(APPID);
       if (reset_pass == "1") {
-//        send_json("RESET", "Password has been change");
+        //        send_json("RESET", "Password has been change");
         reset_pass = "0";
         handle_msg();
         Serial.println("--------------------------- password reset----------------------------");
@@ -1507,132 +1915,150 @@ void loop() {
     // wifi check disconnect
     if (WiFi.status() != WL_CONNECTED) {
       setup_wifi();
-      if (WiFi.status() == WL_CONNECTED) {
+    } else {
+      if (microgear.connected()) {
+        microgear.loop();
+      } else {
         microgear.init(KEY, SECRET, ALIAS);
         microgear.connect(APPID);
         microgear.loop();
       }
-    }
 
-    // microgear check disconnect
-    if ((WiFi.status() == WL_CONNECTED) && (!microgear.connected())) {
-      microgear.init(KEY, SECRET, ALIAS);
-      microgear.connect(APPID);
-      microgear.loop();
-    }
+      deviceOnline(3600000);
 
-    if (microgear.connected()) {
-      microgear.loop();
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      if (bleState == 0) {
-        digitalWrite(blue_led, LOW);
-        if (digitalRead(ble_button) == HIGH) {
-          Serial.println("Pressing ble button");
-          bleState = 1;
-          bleBtnTimer = timer;
-        }
-      } else if (bleState == 1) {
-        if (digitalRead(ble_button) == LOW) {
-          Serial.println("Press ble button again !!");
-          bleState = 0;
-        } else if (timer - bleBtnTimer >= 1000 && digitalRead(ble_button) == HIGH) {
-          Serial.println("BLE Starting ...");
-          bleState = 2;
-        }
-      } else if (bleState == 2) {
-        //        Serial.println("BLE scanning ...");
-        displayBTScan();
-        BLEScan *pBLEScan = BLEDevice::getScan();
-        pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-        pBLEScan->setActiveScan(true);
-        pBLEScan->start(30);
-        pBLEScan->clearResults();
-        if (bleState == 2) {
-          displayBTScanFailed();
-          delay(5000);
+      if (state == 0) {
+        if (bleState == 0) {
+          //        digitalWrite(blue_led, HIGH);
+          ledOff();
+          if (digitalRead(ble_button) == HIGH) {
+            Serial.println("Pressing ble button");
+            bleState = 1;
+            bleBtnTimer = timer;
+          }
+        } else if (bleState == 1) {
+          if (digitalRead(ble_button) == LOW) {
+            Serial.println("Press ble button again !!");
+            bleState = 0;
+          } else if (timer - bleBtnTimer >= 1000 && digitalRead(ble_button) == HIGH) {
+            Serial.println("BLE Starting ...");
+            bleState = 2;
+          }
+        } else if (bleState == 2) {
+          //        Serial.println("BLE scanning ...");
+          displayBTScan();
+          BLEScan *pBLEScan = BLEDevice::getScan();
+          pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+          pBLEScan->setActiveScan(true);
+          pBLEScan->start(30);
+          pBLEScan->clearResults();
+          if (bleState == 2) {
+            displayBTScanFailed();
+            delay(5000);
+            bleState = 6;
+          }
+        } else if (bleState == 3) {
+          Serial.println("BLE BP connecting ...");
+          bleState = 4;
+          bleConnectToServer(*pServerAddress);
+        } else if (bleState == 4) {
+          //          Serial.println("BLE waiting ...");
+          ledBlueOn();
+          delay(100);
+          ledOff();
+          delay(100);
+          displayConnectingBP();
+          if (timer - bleConnectingTimer >= 10000) {
+            bleState = 6;
+          }
+        } else if (bleState == 5) {
+          //          Serial.println("BLE measuring ...");
+          displayMeasureBP();
+          //        digitalWrite(blue_led, LOW);
+          ledBlueOn();
+        } else if (bleState == 6) {
+          displayBTOxiScan();
+          BLEScan *pBLEScan = BLEDevice::getScan();
+          pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+          pBLEScan->setInterval(1349);
+          pBLEScan->setWindow(449);
+          pBLEScan->setActiveScan(true);
+          pBLEScan->start(30);
+          pBLEScan->clearResults();
+          if (bleState == 6) {
+            displayBTOxiScanFailed();
+            delay(5000);
+            displayHome();
+            bleState = 0;
+          }
+        } else if (bleState == 7) {
+          Serial.println("BLE Oxi connecting ...");
+          bleState = 8;
+          bleConnectToServerOxi(*pServerAddress);
+        } else if (bleState == 8) {
+          //          Serial.println("BLE waiting ...");
+          //        digitalWrite(blue_led, LOW);
+          ledBlueOn();
+          delay(100);
+          //        digitalWrite(blue_led, HIGH);
+          ledOff();
+          delay(100);
+          displayConnectingOxi();
+          if (timer - bleConnectingTimer >= 10000) {
+            bleState = 0;
+          }
+        } else if (bleState == 9) {
+          displayMeasureOxi();
+          //        digitalWrite(blue_led, LOW);
+          ledBlueOn();
+        } else if (bleState == 10) {
+          ledBlueOn();
+          sendHealthInfo();
+          bleState = 6;
+        } else if (bleState == 11) {
+          ledBlueOn();
+          sendHealthInfoOxi();
           displayHome();
           bleState = 0;
         }
-      } else if (bleState == 3) {
-        Serial.println("BLE connecting ...");
-        bleState = 4;
-        bleConnectToServer(*pServerAddress);
-      } else if (bleState == 4) {
-        //          Serial.println("BLE waiting ...");
-        digitalWrite(blue_led, HIGH);
-        delay(100);
-        digitalWrite(blue_led, LOW);
-        delay(100);
-        displayConnectingBP();
-        if (timer - bleConnectingTimer >= 10000) {
-          bleState = 0;
-        }
-      } else if (bleState == 5) {
-        //          Serial.println("BLE measuring ...");
-        displayMeasureBP();
-        digitalWrite(blue_led, HIGH);
-      } else if (bleState == 6) {
-        //          Serial.println("BLE sending data ...");
-        digitalWrite(blue_led, HIGH);
-        delay(1000);
-
-        // Send to database
-        JSONbuffer.clear();
-        JsonObject& JSONencoder = JSONbuffer.createObject();
-        JsonObject& JsonData = JSONencoder.createNestedObject("data");
-        JsonData["esp"] = Device_id;
-        JsonData["hbp"] = bleData[3];
-        JsonData["lbp"] = bleData[4];
-        JsonData["hr"] = bleData[5];
-        JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
-        Serial.println(JSONmessageBuffer);
-        HTTPClient http;                                                  //Declare object of class HTTPClient
-        http.begin("http://bhcd-api.herokuapp.com/health-info/new");      //Specify request destination
-        http.addHeader("Content-Type", "application/json");               //Specify content-type header
-        int httpCode = http.POST(JSONmessageBuffer);                      //Send the request
-        Serial.println(httpCode);
-        String payload = http.getString();                                //Get the response payload
-        Serial.println(payload);                                          //Print request response payload
-        if (httpCode != 201) {
-          return;
-        }
-        http.end();
-
-        // Notification to line bot
-        httpCode = -1;
-        do {
-          HTTPClient http;                                                  //Declare object of class HTTPClient
-          http.begin("http://bhcd-line-bot-noti.herokuapp.com/health-info");      //Specify request destination
-          http.addHeader("Content-Type", "application/json");               //Specify content-type header
-          httpCode = http.POST(JSONmessageBuffer);                          //Send the request
-          Serial.println(httpCode);
-          String payload = http.getString();                                //Get the response payload
-          Serial.println(payload);                                          //Print request response payload
-          http.end();
-        } while (httpCode != 200);
-
-        displayHealthInfo();
-        digitalWrite(blue_led, HIGH);
-        beep(60);
-        delay(100);
-        digitalWrite(blue_led, LOW);
-        beep(60);
-        delay(100);
-        bleState = 0;
       }
 
       if (state == 0) {
         // State 0 : Normal mode and press button
-        digitalWrite(green_led, HIGH);
+        //        digitalWrite(green_led, LOW);
+        ledGreenOn();
         if (buttonState == HIGH) {
           unsigned long timerAck = ((timer - preTime) / 1000);
-          if ( timerAck >= 1.0) {
+          if (timerAck >= 1.0) {
             state = 3;
           }
         } else {
           preTime = timer;
+        }
+      } else if (state == 10) {
+        delay(3000);
+        double allHeight = 0;
+        int hCount = 0;
+        for (int i = 0; i < 20; i++) {
+          bme.takeForcedMeasurement();
+          double h = bme.readAltitude(SEALEVELPRESSURE_HPA);
+          if (h > 0) {
+            allHeight += h;
+            hCount++;
+          }
+          bmeTimer = millis();
+          delay(10);
+        }
+        double bmeInt = 0;
+        if (hCount > 0)
+          bmeInt = allHeight / hCount;
+        double deltaH = bmeHeightNow - bmeInt;
+        Serial.print("Falling!! Delta Height : ");
+        Serial.println(deltaH);
+        microgear.chat("HTML-BHCD", deltaH);
+        if (deltaH > 0.3 || deltaH < -0.3) {
+          state = 1;
+        } else {
+          state = 0;
         }
       } else if (state == 1) {
         // State 1 : Detect free falling
@@ -1640,19 +2066,22 @@ void loop() {
 
         // Wait 8 sec
         if (((timer - timeOut) / 1000) <= 8) {
-          digitalWrite(green_led, HIGH);
-          digitalWrite(vibration_motor , LOW);
-          delay(500);
-          digitalWrite(green_led, LOW);
+          //          digitalWrite(green_led, LOW);
+          ledGreenOn();
           pinMode(vibration_motor, OUTPUT);
           digitalWrite(vibration_motor , HIGH);
+          delay(500);
+          //          digitalWrite(green_led, HIGH);
+          ledOff();
+          pinMode(vibration_motor, INPUT);
           delay(500);
 
           // Press more than 1 sec to cancel
           if (buttonState == HIGH) {
             unsigned long timerAck = ((timer - preTime) / 1000);
             if (timerAck >= 1.0) {
-              digitalWrite(green_led, LOW);
+              //              digitalWrite(green_led, HIGH);
+              ledOff();
               digitalWrite(vibration_motor , HIGH);
               delay(50);
               state = 4;
@@ -1669,14 +2098,15 @@ void loop() {
       } else if (state == 2) {
         // State 2 : send notification
         if (ACK == 1) {
-          //          send_notification(30 * 1000);
           if (DETECT == "FALL") {
             sendFalling(30000);
+            displayFalling();
           } else if (DETECT == "PRESS") {
             sendHelp(30000);
+            displayHelp();
           }
           siren();
-        } else {
+        } else if (ACK == 0) {
           siren2();
         }
 
@@ -1684,10 +2114,9 @@ void loop() {
         buttonState = digitalRead(confirm_button);
         if (buttonState == HIGH) {
           unsigned long timerAck = ((timer - preTime) / 1000);
-          if ( timerAck >= 1) {
-            //            send_json("HELPACK", "HELPACK");
+          if (timerAck >= 1) {
             sendHelpAck();
-            analogWrite(buzzer, 0);       // 0 turns it off
+            stopSiren();
             state = 4;
           }
         } else {
@@ -1697,30 +2126,34 @@ void loop() {
         // State 3 : if real press send PRESS ack
         buttonState = digitalRead(confirm_button);
         if (buttonState == HIGH) {
-
-        } else {
           DETECT = "PRESS";
+          ACK = 1;
           state = 2;
         }
       } else if (state == 4) {
         // State 4 : if real press to stop notification
         buttonState = digitalRead(confirm_button);
         if (buttonState == HIGH) {
-
-        } else {
-          ACK = 1;    // Enable send massage to line every 30 sec
           state = 5;
+        } else {
+          state = 2;
         }
       } else if (state == 5) {
         // State 5 : Blink & beep after stop notification
-        digitalWrite(green_led, HIGH);
-        beep(60);
-        digitalWrite(green_led, LOW);
-        beep(60);
-        digitalWrite(green_led, HIGH);
-        state = 0;
+        if (buttonState == LOW) {
+          ledGreenOn();
+          beep(60);
+          delay(100);
+          ledOff();
+          beep(60);
+          delay(100);
+          ledGreenOn();
+          state = 0;
+          displayHome();
+        }
       }
       //read_battery_milsec(600000);
+      readBattery();
     }
   }
 }
