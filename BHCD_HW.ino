@@ -41,22 +41,32 @@ static BLERemoteCharacteristic* writeChar;
 int bleState = 0;
 long bleBtnTimer = 0;
 long bleConnectingTimer = 0;
-uint8_t* bleData;
-uint8_t* bleOxiData;
+uint8_t hbp = 0;
+uint8_t lbp = 0;
+uint8_t hr = 0;
+long spo2Data = 0;
 BLEClient*  pClient;
 
 static void notifyCallback(BLERemoteCharacteristic* notifyChar, uint8_t* pData, size_t length, bool isNotify) {
-  if (bleState == 5 && length == 8 & pData[3] > 0 && pData[4] > 0 && pData[5] > 0) {
-    bleData = pData;
+  if (bleState == 5 && length == 8 && pData[3] > 0 && pData[4] > 0 && pData[5] > 0) {
+    hbp = pData[3];
+    lbp = pData[4];
+    hr = pData[5];
     bleState = 10;
   }
 }
 
+int oxiCounter = 0;
+long oxiSum = 0;
 static void notifyOxiCallback(BLERemoteCharacteristic* notifyChar, uint8_t* pData, size_t length, bool isNotify) {
-  if (bleState == 9 && pData[0] == 129 && pData[2] < 127 && pData[2] > 0) {
-    bleOxiData = pData;
-    pClient->disconnect();
+  if (oxiCounter >= 10) {
+    spo2Data = oxiSum / oxiCounter;
     bleState = 11;
+    pClient->disconnect();
+  } else if (bleState == 9 && pData[0] == 129 && pData[2] < 127 && pData[2] > 0) {
+    Serial.println(oxiCounter);
+    oxiSum += pData[2];
+    oxiCounter++;
   }
 }
 
@@ -370,16 +380,14 @@ void sendHelpPreAck() {
 }
 
 void sendHealthInfo() {
-  displayHealthInfo();
-
   StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
   char JSONmessageBuffer[300];
   JsonObject& JSONencoder = JSONbuffer.createObject();
   JsonObject& JsonData = JSONencoder.createNestedObject("data");
   JsonData["esp"] = Device_id;
-  JsonData["hbp"] = bleData[3];
-  JsonData["lbp"] = bleData[4];
-  JsonData["hr"] = bleData[5];
+  JsonData["hbp"] = hbp;
+  JsonData["lbp"] = lbp;
+  JsonData["hr"] = hr;
   JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
   Serial.println(JSONmessageBuffer);
   HTTPClient http;                                                  //Declare object of class HTTPClient
@@ -408,7 +416,7 @@ void sendHealthInfo() {
       delay(100);
       ledOff();
       beep(60);
-      delay(5000);
+      delay(100);
       return;
     }
     HTTPClient http;                                                    //Declare object of class HTTPClient
@@ -423,14 +431,15 @@ void sendHealthInfo() {
 }
 
 void sendHealthInfoOxi() {
-  displayHealthInfoOxi();
+
+  Serial.println(spo2Data);
 
   StaticJsonBuffer<300> JSONbuffer;   //Declaring static JSON buffer
   char JSONmessageBuffer[300];
   JsonObject& JSONencoder = JSONbuffer.createObject();
   JsonObject& JsonData = JSONencoder.createNestedObject("data");
   JsonData["esp"] = Device_id;
-  JsonData["spo2"] = bleOxiData[2];
+  JsonData["spo2"] = spo2Data;
   JSONencoder.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
   Serial.println(JSONmessageBuffer);
   HTTPClient http;                                                  //Declare object of class HTTPClient
@@ -459,7 +468,7 @@ void sendHealthInfoOxi() {
       delay(100);
       ledOff();
       beep(60);
-      delay(5000);
+      delay(100);
       return;
     }
     HTTPClient http;                                                    //Declare object of class HTTPClient
@@ -733,11 +742,9 @@ void setup_wifi() {
   WiFi.mode(WIFI_STA);
   for (int j = 0 ; j < 4 ; j++) {
     if (WiFi.status() != WL_CONNECTED) {
-      //      digitalWrite(green_led, LOW);
       ledGreenOn();
       delay(100);
       beep(750);
-      //      digitalWrite(green_led, HIGH);
       ledOff();
       current_ssid = ssid_list[j];
       char ssid1[current_ssid.length()];
@@ -752,6 +759,9 @@ void setup_wifi() {
       //      Serial.println(password1);
       n = WiFi.scanNetworks();
       for (int k = 0; k < n ; k++) {
+        if (WiFi.status() == WL_CONNECTED) {
+          break;  
+        }
         Serial.println("wifi scan " + WiFi.SSID(k));
         current_ssid.trim();
         current_password.trim();
@@ -759,23 +769,25 @@ void setup_wifi() {
           WiFi.begin(ssid1, password1);
           for (int i = 0 ; i < 20; i ++) {
             if (WiFi.status() != WL_CONNECTED) {
-              //              digitalWrite(green_led, HIGH);
               ledOff();
               delay(250);
               beep(100);
               Serial.print(".");
-              //              digitalWrite(green_led, LOW);
               ledGreenOn();
               delay(250);
+            } else {
+              break;
             }
           }
         }
       }
     } else {
-      Serial.print("Ending");
-      j = 5;
+      Serial.print("Connecting Wifi Ending");
+      //      j = 5;
+      break;
     }
   }
+
   if (WiFi.status() == WL_CONNECTED) {
     //digitalWrite(wifi_led, HIGH);
     ledGreenOn();
@@ -788,6 +800,8 @@ void setup_wifi() {
   } else {
     displayFailConnectWiFi();
   }
+
+  delay(3000);
 }
 
 
@@ -1227,6 +1241,8 @@ void bleConnectToServerOxi(BLEAddress pAddress) {
   writeChar->writeValue((uint8_t*)startPressure, 6, true);
 
   // BLE Connected
+  oxiCounter = 0;
+  oxiSum = 0;
   bleState = 9;
 }
 
@@ -1508,11 +1524,12 @@ void displayHealthInfo() {
   iconWiFi();
   iconActive();
   iconBT();
-  display.setTextSize(1); // Draw 2X-scale text
+  display.setTextSize(2); // Draw 2X-scale text
   display.setTextColor(WHITE);
   display.setCursor(0, 16);
-  display.println("SYS/DIS : " + String(bleData[3]) + "/" + String(bleData[4]));
-  display.println("PULSE : " + String(bleData[5]));
+  display.println("SYS/DIS : ");
+  display.println(String(hbp) + "/" + String(lbp));
+  display.println("PULSE : " + String(hr));
   display.display();      // Show initial text
 }
 
@@ -1525,10 +1542,10 @@ void displayHealthInfoOxi() {
   iconWiFi();
   iconActive();
   iconBT();
-  display.setTextSize(1);
+  display.setTextSize(2);
   display.setTextColor(WHITE);
   display.setCursor(0, 16);
-  display.println("SPO2 : " + String(bleOxiData[2]));
+  display.println("SPO2 : " + String(spo2Data));
   display.display();
 }
 
@@ -2012,11 +2029,15 @@ void loop() {
           ledBlueOn();
         } else if (bleState == 10) {
           ledBlueOn();
+          displayHealthInfo();
           sendHealthInfo();
+          delay(5000);
           bleState = 6;
         } else if (bleState == 11) {
           ledBlueOn();
+          displayHealthInfoOxi();
           sendHealthInfoOxi();
+          delay(5000);
           displayHome();
           bleState = 0;
         }
